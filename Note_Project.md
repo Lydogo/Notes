@@ -436,7 +436,6 @@ IK：末端Pose → 关节角向量，MoveIt2框架内部使用KDL（Kinematics 
 - 解决措施：取消无约束高频定频读取，增设约束：动作指令发送完成前禁止状态获取；优化控制锁范围，删除无效长时间锁占用，避免锁竞争加剧混乱。
 
 
-
 # 面试复盘
 ## 25.10.10 海恒智能 机械臂算法工程师
 ### 1 ros加moveit2 怎么做一些完整的运动规划和控制？
@@ -518,12 +517,55 @@ PID：
 - 便于部署：可以轻松在不同机器上运行
 ### 13 git基本操作
 
-## 25.12.18 大湾区数字研究院 视觉机械臂算法
+# RL项目实践复盘&Isaaclab使用
+## 25.12.27
+- 声明式物体定义：@configclass:作为python装饰器，代表后面跟着的是一个存储数据的容器，而不包含运行逻辑
+- spwan属性：接受另一个配置对象的属性，方便继承与复用，实现参数化随机化
+- 物理资产与控制逻辑分离
 
+## 26.1.4
+- 通过Isaaclab官方代码库部署容器
+   Problem:容器build失败；卡在了git clone这一步；主机开全局代理也不能保证一定解决，根本原因是docker与宿主机网络端口不互通，宿主机上使用代理不一定有用。
+   1.修改docker-compose.yaml,在build标签下强制开启宿主机网络模式host
+   2.配置Dockerfile.base,设置环境变量确保所有run命令都能处理代理
+- 训练指令单独找一个终端运行，这个终端里面需要container.py start -> container.py enter;enter时会设置一些参数
+- 跑通开源项目中的项目reach：先用train.py训练，再用play.py展示；这里面的API可能会比较老旧，需要及时更新
+- 使用Tensorboard查看训练曲线：这一步可以放在宿主机内的终端里面使用，只要在logs目录下即可，在docker内端口转发容易出现bug
+```bash
+tensorboard --logdir .
+```
+## 26.1.5
+- 跑通lift项目
+- 注册问题：在Isaaclab的架构中，所有的环境都需要通过gym.register函数进入注册表，这样play.py/train/py才能通过task字段找到对应的配置类。基本上所有的注册信息都是在__init__.py这个文件里面import的，会使用如下代码一层一层导入。
 
+```python
+#导入config模块注册环境，即再到config文件夹下查看__init__.py的导入信息
+from . import config
+```
 
+- observations.py:计算目标物体相对于root frame的相对坐标
+   相比于使用绝对世界坐标，使用相对坐标可以提高策略的泛化能力和学习能力
 
+```python
+# subtract_frame_transforms 将物体的世界坐标减去机器人的位姿，实现世界系到局部系的转换
+    object_pos_b, _ = subtract_frame_transforms(
+        robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], object_pos_w
+    )
+```
 
+- rewards.py:奖励函数，示例里包含3个奖励函数
+   object_is_lifted
+   object_ee_distance
+   object_goal_distance
+
+## 26.1.6
+- 怎么去找一些配置类：需要先ctrl+shift+p -> run task ->运行一下isaaclab自带的python脚本，才能看到跳转的函数定义
+- 多查看isaaclab的一些源代码，因为不同的代码用的版本可能不一样，一些库的调用上可能会存在一些偏差，这个点需要注，按照实际代码修改一下
+- 下一步将lift中的cube换成长方体进行训练：
+   1.observations，知道物体的旋转角度，才能从薄的那一面进行抓取
+   2.rewards，增加一些奖励
+   3.rsl_rl里面的算法库一般不需要修改，但可以改一下学习率、迭代次数之类的
+   4.注册信息和一些相关的配置类
 
 
 
