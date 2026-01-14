@@ -588,3 +588,82 @@ from . import config
   改进思路：
   1.增加平滑过渡+线性插值，使得物体被举高后这两个奖励函数就不再生效
   2.修改奖励机制，有没有可能让夹爪去和世界坐标系对齐，而不是物体的属性，因为物体的向量会改变
+
+## 26.1.13
+### PPO算法原理(以rsl_rl源码为例)：
+- 关键公式：
+Clip Surrogate Object:
+$$L^{CLIP}(\theta) = \hat{\mathbb{E}}_t \left[ \min \left( r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right]$$
+Total Loss Function:
+$$L_t^{PPO}(\theta) = \hat{\mathbb{E}}_t \left[ L_t^{CLIP}(\theta) - c_1 L_t^{VF}(\theta) + c_2 S[\pi_{\theta}](s_t) \right]$$
+- Actor-Critic模型结构
+```python
+# 简化逻辑示意
+class ActorCritic(nn.Module):
+    def __init__(self, ...):
+        # 定义策略网络 (Actor)
+        self.actor = nn.Sequential(...) # 输出动作均值 mu
+        # 定义价值网络 (Critic)
+        self.critic = nn.Sequential(...) # 输出状态价值 V(s)
+        # 动作标准差 (Action Standard Deviation)，代表探索的随机性
+        self.std = nn.Parameter(torch.ones(num_actions))
+
+    def act(self, observations):
+        # 采样动作：根据正态分布 N(mu, std)
+        mu = self.actor(observations)
+        dist = Normal(mu, self.std)
+        action = dist.sample()
+        return action, dist.log_prob(action), self.critic(observations)
+```
+- 计算比例和Clip损失
+```python
+# 获取新旧策略的动作概率比
+actions_log_prob_batch = self.actor_critic.get_actions_log_prob(obs_batch, actions_batch)
+ratio = torch.exp(actions_log_prob_batch - old_actions_log_prob_batch)
+
+# PPO Clipped Objective
+surrogate = -advantages_batch * ratio
+surrogate_clipped = -advantages_batch * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+# 取两者中的最大值（因为这里带了负号，等同于论文里的 min）
+action_loss = torch.max(surrogate, surrogate_clipped).mean()
+```
+```python
+# Critic 的损失：预测值与目标值 (Returns) 的均方误差
+value_loss = (return_batch - value_batch).pow(2).mean()
+```
+```python
+# 鼓励探索
+entropy_loss = dist.entropy().mean()
+```
+```python
+# 总损失 = 策略损失 + 价值损失权重 * 价值损失 - 熵权重 * 熵损失
+loss = action_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_loss
+
+# 反向传播
+self.optimizer.zero_grad()
+loss.backward()
+self.optimizer.step()
+```
+- 使用GAE(Generalized Advantage Estimation)计算优势函数
+```python
+def compute_returns(self, last_values, gamma, lam):
+    advantage = 0
+    for step in reversed(range(self.num_transitions_per_env)):
+        next_values = last_values if step == self.num_transitions_per_env - 1 else self.values[step + 1]
+        # TD 误差 delta
+        delta = self.rewards[step] + gamma * next_values * self.not_done[step] - self.values[step]
+        # GAE 递归计算
+        advantage = delta + gamma * lam * self.not_done[step] * advantage
+        self.advantages[step] = advantage
+        self.returns[step] = self.advantages[step] + self.values[step]
+```
+
+## 26.1.14
+- 从lift book到grasp&pull book，从书架上夹取书本往外拿
+- 在 Isaac Lab 中，大规模并行仿真（env_nums > 1）会导致全局坐标系与局部坐标系不一致，这会导致：直接使用 root_pos_w（全局世界坐标）进行阈值判断时，由于环境平铺（env_spacing），除 0 号环境外，其他环境的物体全局坐标可能天生小于阈值，导致奖励信号从第一帧起就处于“刷分”状态，造成模型不收敛或梯度爆炸。所以全局坐标可以用于物理模拟，而需要用相对坐标做奖励逻辑。
+
+```python
+relative_x = object.data.root_pos_w[:, 0] - env.scene.env_origins[:, 0]
+
+is_pulled = relative_x < (0.8 - minimal_distance)
+```
