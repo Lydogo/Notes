@@ -518,87 +518,143 @@ PID：
 ### 13 git基本操作
 
 # RL项目实践复盘&Isaaclab使用
-## 25.12.27
-- 声明式物体定义：@configclass:作为python装饰器，代表后面跟着的是一个存储数据的容器，而不包含运行逻辑
-- spwan属性：接受另一个配置对象的属性，方便继承与复用，实现参数化随机化
-- 物理资产与控制逻辑分离
+## 25.12.27 ｜ 环境定义架构
 
-## 26.1.4
-- 通过Isaaclab官方代码库部署容器
-   Problem:容器build失败；卡在了git clone这一步；主机开全局代理也不能保证一定解决，根本原因是docker与宿主机网络端口不互通，宿主机上使用代理不一定有用。
-   1.修改docker-compose.yaml,在build标签下强制开启宿主机网络模式host
-   2.配置Dockerfile.base,设置环境变量确保所有run命令都能处理代理
-- 训练指令单独找一个终端运行，这个终端里面需要container.py start -> container.py enter;enter时会设置一些参数
-- 跑通开源项目中的项目reach：先用train.py训练，再用play.py展示；这里面的API可能会比较老旧，需要及时更新
-- 使用Tensorboard查看训练曲线：这一步可以放在宿主机内的终端里面使用，只要在logs目录下即可，在docker内端口转发容易出现bug
-```bash
-tensorboard --logdir .
-```
-## 26.1.5
-- 跑通lift项目
-- 注册问题：在Isaaclab的架构中，所有的环境都需要通过gym.register函数进入注册表，这样play.py/train/py才能通过task字段找到对应的配置类。基本上所有的注册信息都是在__init__.py这个文件里面import的，会使用如下代码一层一层导入。
+### 1. 配置类（@configclass）
+* **本质**：纯数据容器（Python Decorator），不含运行逻辑。
+* **作用**：实现参数与逻辑解耦。通过修改配置类即可切换物理属性，无需改动环境核心代码。
 
-```python
-#导入config模块注册环境，即再到config文件夹下查看__init__.py的导入信息
-from . import config
-```
+### 2. Spawn 属性
+* **机制**：支持配置对象的继承与复用。
+* **随机化**：通过 `spawn` 实现资产的参数化定义，是实现大规模并行环境随机化的核心入口。
 
-- observations.py:计算目标物体相对于root frame的相对坐标
-   相比于使用绝对世界坐标，使用相对坐标可以提高策略的泛化能力和学习能力
+### 3. 架构解耦
+* **物理资产**（Asset）与**控制逻辑**（Manager）彻底分离。
+* 资产层只定义“物体是什么”，逻辑层（Reward/Obs/Action Managers）定义“怎么做”。
 
-```python
-# subtract_frame_transforms 将物体的世界坐标减去机器人的位姿，实现世界系到局部系的转换
+---
+
+## 26.1.4 ｜ Docker 部署与项目跑通
+
+### 1. Docker Build 网络故障
+* **问题**：`build` 过程中 `git clone` 失败。主机全局代理无效，因 Docker 编译环境与宿主机网络默认不互通。
+* **解决方法**：
+    1.  `docker-compose.yaml`：在 `build` 标签下添加 `network: host` 强制共享宿主机网络。
+    2.  `Dockerfile.base`：显式设置环境变量 `ENV http_proxy` 和 `ENV https_proxy`。
+
+### 2. 容器操作流程
+* **标准步骤**：`container.py start` -> `container.py enter`。
+* **注意**：必须通过 `enter` 脚本进入容器，系统会自动挂载路径并配置 `PYTHONPATH` 等环境变量，手动 `docker exec` 会导致路径报错。
+
+### 3. 项目运行与迁移
+* **基础链路**：`train.py` 训练模型 -> `play.py` 加载模型演示。
+* **API 兼容性**：老旧项目需对比官方最新 Demo 检查 `ManagerTermBase` 等 API 的函数签名，重点关注参数名的更新。
+
+### 4. 数据可视化（Tensorboard）
+* **避坑**：Docker 内端口转发不稳定，且占用容器资源。
+* **最佳实践**：在宿主机终端直接运行，通过挂载的 `logs` 目录实时读取：
+    ```bash
+    tensorboard --logdir .
+    ```
+---
+
+## 26.1.5 ｜ Lift 项目跑通与核心逻辑
+
+### 1. 环境注册机制（Registration）
+* **流程**：Isaac Lab 通过 `gym.register` 将环境加入注册表。`train.py` 或 `play.py` 通过 `--task` 参数从注册表中检索配置。
+* **入口**：注册信息通常集中在模块的 `__init__.py` 中。
+* **链式导入**：通过 `from . import config` 等语句实现层层递进式加载，确保在运行脚本前，所有自定义环境配置已注入 Gym 注册表。
+
+### 2. 观测空间设计（Observations）
+* **泛化性原则**：优先使用**相对坐标**。相比绝对坐标，相对坐标（如物体相对于机器人基座）能让策略更易学习空间几何关系，提高在不同初始位姿下的泛化能力。
+* **坐标转换**：利用 `subtract_frame_transforms` 将物体从世界坐标系（World Frame）转换至机器人局部坐标系（Local/Root Frame）。
+    ```python
+    # 实现世界系到局部系的转换：(物体世界位姿 - 机器人世界位姿)
     object_pos_b, _ = subtract_frame_transforms(
         robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], object_pos_w
     )
-```
+    ```
 
-- rewards.py:奖励函数，示例里包含3个奖励函数
-   object_is_lifted
-   object_ee_distance
-   object_goal_distance
+### 3. 奖励函数结构（Rewards）
+Lift 示例通常包含三个关键引导项：
+* `object_is_lifted`：物体是否离开台面的离散/连续奖励。
+* `object_ee_distance`：末端执行器（EE）与物体的接近诱导奖励。
+* `object_goal_distance`：物体与目标位置的距离惩罚。
 
-## 26.1.6
-- 怎么去找一些配置类：需要先ctrl+shift+p -> run task ->运行一下isaaclab自带的python脚本，才能看到跳转的函数定义
-- 多查看isaaclab的一些源代码，因为不同的代码用的版本可能不一样，一些库的调用上可能会存在一些偏差，这个点需要注，按照实际代码修改一下
-- 下一步将lift中的cube换成长方体进行训练：
-   1.observations，知道物体的旋转角度，才能从薄的那一面进行抓取
-   2.rewards，增加一些奖励
-   3.rsl_rl里面的算法库一般不需要修改，但可以改一下学习率、迭代次数之类的
-   4.注册信息和一些相关的配置类
+---
 
-## 26.1.7
-- 把物体从正方形改成长方体进行抓取：
-  1.夹爪会通过蹭长方体物体，使得物体竖直起来，从而达到lift的效果，这是因为奖励函数中把lift_object的权重设置的太高，并且抬升的距离设置的不够，所以说物体并没有真正的被夹起来
+## 26.1.6 ｜ 源码追踪与任务迁移
 
-  2.增加奖励函数，设置夹爪到物体重心的距离越小奖励越高，从而使agent学会夹取，而不是使用蹭的方法作弊；增加抬升的距离，避免物体竖直就可以达到这一长度。
-  
-  3.按照上述方法增加奖励函数但是依旧夹取失败，此时夹爪会夹住物体但是不进行抬升，观察对比曲线(RL_26.1.7中的紫色为失败的数据)，发现lifting_object中紫色曲线直接降低，后面一直为0，导致夹取后不抬升。从而发现原因是lifting distance设置的过于大，超过了机械臂本身的可达范围
-  ![RL_26.1.7](Picture/RL_260107_01.png "RL_26.1.7")
+### 1. 开发技巧：函数跳转
+* **痛点**：由于 Isaac Lab 路径复杂，IDE 默认无法直接跳转到外部库定义。
+* **解决方法**：`Ctrl+Shift+P` -> `Tasks: Run Task` -> 运行一次 Isaac Lab 提供的 Python 环境配置脚本，使 IDE 索引生效。
 
-- 下一步：设置长方体任意角度摆放，通过增加夹爪与书本角度是否平行的奖励函数，使得agent学会从薄的那一边进行夹取
+### 2. 源码阅读注意点
+* **版本差异**：Isaac Lab 迭代快，不同分支的代码实现（如库的调用路径）可能存在偏差。务必以当前本地库的源码定义为准进行修改。
 
-## 26.1.8
-- 在event中增加随机值，使物体可以以不同的旋转角度摆放，模拟书在书架上不同的姿态
-- 由于实际系统是相机检测会给一个以书本为中心，朝向书本倾斜方向的向量到控制层，所以为了后续sim2real能够直接进行，需要将这个向量增加到观测量中
-- 增加了两个奖励函数：----方便夹爪调整姿态进行夹取
-  1.引导平行奖励：让ee的x轴与向量平行
-  2.引导垂直奖励：让ee的z轴与向量垂直
-- 增加了这两个奖励函数后出现的现象：当ee举起了物体，夹爪依旧会为了这两个奖励项调整姿态，具体表现为机械臂疯狂抖动+以不自然角度扭曲，这也有可能是joint_vel和action_rate的惩罚项过于小导致的
-  改进思路：
-  1.增加平滑过渡+线性插值，使得物体被举高后这两个奖励函数就不再生效
-  2.修改奖励机制，有没有可能让夹爪去和世界坐标系对齐，而不是物体的属性，因为物体的向量会改变
+### 3. 任务拓展：从 Cube 迁移到长方体（模拟书本）抓取
+若要训练机械臂从薄面抓取长方体，需从以下维度调整：
+* **观测（Obs）**：必须引入**物体旋转角（Orientation）**，否则策略无法感知长方体的长短边，无法精准定位抓取面。
+* **奖励（Rewards）**：
+    * 增加姿态对齐奖励（如 EE X轴与物体法线的夹角）。
+    * 增加抓取稳定性奖励。
+* **算法配置（RSL_RL）**：算法逻辑通常无需改动，但针对更精细的任务，可能需要微调学习率（Learning Rate）或增加训练迭代次数（Max Iterations）。
+* **配置注册**：需新建对应的配置文件并在 `__init__.py` 中更新注册信息。
 
-## 26.1.13
-### PPO算法原理(以rsl_rl源码为例)：
-- 关键公式：
-Clip Surrogate Object:
-$$L^{CLIP}(\theta) = \hat{\mathbb{E}}_t \left[ \min \left( r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right]$$
-Total Loss Function:
-$$L_t^{PPO}(\theta) = \hat{\mathbb{E}}_t \left[ L_t^{CLIP}(\theta) - c_1 L_t^{VF}(\theta) + c_2 S[\pi_{\theta}](s_t) \right]$$
-- Actor-Critic模型结构
+## 26.1.7 ｜ 长方体抓取：奖励破解与物理约束
+
+### 1. 奖励破解（Reward Hacking）现象
+* **问题**：改成长方体后，机械臂学会了通过“侧蹭”使物体竖立来骗取 `lift_object` 分数，而非真正夹取。
+* **成因**：`lift_object` 权重过高且目标高度阈值设定过低，导致“竖立”动作产生的位移足以触发奖励。
+
+### 2. 引导奖励与物理极限
+* **优化**：引入 `EE_to_object_distance` 奖励，强制末端靠近重心中点，抑制“蹭”的行为。
+* **失败分析（紫色曲线）**：增加抬升高度后任务失败。对比 Tensorboard 曲线发现，抬升奖励归零是因为设置的高度**超出了机械臂的物理可达范围（Workspace Limit）**。
+* **反思**：奖励目标必须设定在机器人运动学范围内，否则会引导策略进入死胡同。
+
+![RL_26.1.7](Picture/RL_260107_01.png "RL_26.1.7")
+
+---
+
+## 26.1.8 ｜ 姿态对齐与 Sim2Real 预演
+
+### 1. 随机化与观测增强
+* **Domain Randomization**：在 `EventCfg` 中增加初始偏航角（Yaw）随机化，模拟物体在书架上的不同摆放姿态。
+* **Sim2Real 衔接**：模拟相机检测逻辑，将“物体中心指向倾斜方向的向量”注入观测空间（Observations），为后续实机部署对齐数据流。
+
+### 2. 引导对齐奖励（Orientation Guidance）
+为引导夹爪从薄面夹取，新增两项奖励：
+* **平行奖励**：EE 的 X 轴与物体向量平行。
+* **垂直奖励**：EE 的 Z 轴与物体向量垂直。
+
+### 3. 负面现象：任务后过度调整（Over-optimization）
+* **现象**：物体举起后，夹爪为追求姿态分持续扭动，导致机械臂高频抖动或姿态扭曲。
+* **根源**：
+    1.  `joint_vel` 和 `action_rate` 惩罚项过小，不足以抑制高频震荡。
+    2.  奖励函数在任务完成后未失效，导致 AI 在高处“刷分”。
+
+### 4. 改进思路：奖励消隐与参考系切换
+* **线性消隐（Linear Decay）**：引入线性插值，随着物体高度增加（任务接近完成），逐渐降低姿态奖励的权重，使机器人后期专注于稳定维持。
+* **坐标系重构**：考虑将夹爪对齐目标由“物体局部向量”改为“世界坐标系轴向”。
+    * **优点**：物体的局部向量在被抓起旋转时会剧烈变动，导致奖励不稳定；对齐世界坐标系（如垂直于地面）通常能提供更稳定的梯度。
+
+## 26.1.13 ｜ PPO 算法原理（基于 rsl_rl 源码）
+
+### 1. 核心损失函数
+PPO 通过限制策略更新幅度来确保训练稳定性。其核心公式为：
+
+* **策略裁剪（Clip Surrogate Object）**: 
+    $$L^{CLIP}(\theta) = \hat{\mathbb{E}}_t \left[ \min \left( r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right]$$
+* **总损失函数（Total Loss）**: 
+    $$L_t^{PPO}(\theta) = \hat{\mathbb{E}}_t \left[ L_t^{CLIP}(\theta) - c_1 L_t^{VF}(\theta) + c_2 S[\pi_{\theta}](s_t) \right]$$
+
+### 2. Actor-Critic 模型结构
+* **Actor（策略网络）**：输出动作的均值 $\mu$。通过 `std`（标准差）参数构建正态分布进行采样，维持探索性。
+* **Critic（价值网络）**：输出状态价值 $V(s)$，用于评估当前局面的好坏。
+
+### 3. 计算比例和Clip损失
 ```python
-# 简化逻辑示意
+# Actor-Critic简化逻辑示意
 class ActorCritic(nn.Module):
     def __init__(self, ...):
         # 定义策略网络 (Actor)
@@ -615,7 +671,6 @@ class ActorCritic(nn.Module):
         action = dist.sample()
         return action, dist.log_prob(action), self.critic(observations)
 ```
-- 计算比例和Clip损失
 ```python
 # 获取新旧策略的动作概率比
 actions_log_prob_batch = self.actor_critic.get_actions_log_prob(obs_batch, actions_batch)
@@ -644,7 +699,10 @@ self.optimizer.zero_grad()
 loss.backward()
 self.optimizer.step()
 ```
-- 使用GAE(Generalized Advantage Estimation)计算优势函数
+### 4. 优势函数计算：GAE (Generalized Advantage Estimation)
+GAE 通过权衡偏差（Bias）和方差（Variance）来计算优势函数 $\hat{A}_t$。
+* **TD 误差（$\delta$）**: $r_t + \gamma V(s_{t+1}) - V(s_t)$。
+* **递归计算**: 结合 $\gamma$（折扣因子）和 $\lambda$（平滑参数）进行逆序计算，平滑优势估计。
 ```python
 def compute_returns(self, last_values, gamma, lam):
     advantage = 0
@@ -658,25 +716,44 @@ def compute_returns(self, last_values, gamma, lam):
         self.returns[step] = self.advantages[step] + self.values[step]
 ```
 
-## 26.1.14
-- 从lift book到grasp&pull book，从书架上夹取书本往外拿
-- 在 Isaac Lab 中，大规模并行仿真（env_nums > 1）会导致全局坐标系与局部坐标系不一致，这会导致：直接使用 root_pos_w（全局世界坐标）进行阈值判断时，由于环境平铺（env_spacing），除 0 号环境外，其他环境的物体全局坐标可能天生小于阈值，导致奖励信号从第一帧起就处于“刷分”状态，造成模型不收敛或梯度爆炸。所以全局坐标可以用于物理模拟，而需要用相对坐标做奖励逻辑。
+---
 
+## 26.1.14 ｜ 任务进阶：从 Lift 到 Grasp & Pull
+
+### 1. 任务迁移
+目标由单纯的垂直抬升（Lift）转变为从书架中夹取并向外拉出（Pull）。
+
+### 2. 坐标系陷阱：全局 vs 局部
+**痛点**：在 Isaac Lab 大规模并行仿真中，环境按 `env_spacing` 平铺分布。
+* **全局坐标（root_pos_w）**：每个环境的坐标系原点在世界空间中是不同的。
+* **风险**：若直接用全局 $X$ 坐标设定奖励阈值，除 0 号环境外，其他环境可能在起始点就已触发奖励（刷分），导致梯度爆炸或模型无法收敛。
+
+**解决方案**：永远使用**相对坐标**计算奖励逻辑。
 ```python
+# 将物体的世界 X 坐标减去该环境在世界系中的原点 X 坐标
 relative_x = object.data.root_pos_w[:, 0] - env.scene.env_origins[:, 0]
 
-is_pulled = relative_x < (0.8 - minimal_distance)
+# 基于相对位移判断拉出状态
+is_pulled = relative_x < (target_x_offset - minimal_distance)
 ```
 
-## 26.1.15
-### Problem：ee夹住书本不动的现象
-- 主要是权重分配的问题，整个运动过程可以分为两部分：reach & pull。Reach包括：object_ee_distance、object_ee_centering、ee_alignment_to_vector这几个奖励函数用于引导ee靠近书本；Pull包括：pulling_object、object_goal_tracking这几个奖励函数用于奖励agent夹住并取出。实践发现，Pull部分的权重必须远大于Reach，这样agent才有动力夹住书本并取出
+---
 
-### Problem：增加书本倒下的终止条件后训练过程中Value Loss突然增大至inf
-- 增加了书本重心低于一定高度的终止条件，但是没有配套书本倒下就要扣分作为惩罚项目，导致书本倒下终止环境，critic不理解为什么上一秒还有高分，下一面奖励完全消失了。PPO中要尽量避免奖励的不连续性
+## 26.1.15 ｜ 权重分配与训练稳定性
 
-### Problem：成功抓取，但是ee取出书本后，会进行大幅度偏转
-- 一开始把curriculum里面的joint_vel和action_rate权重调的太小了，导致agent并不在意关节速度和动作幅度的惩罚，因此到达目标位置后也会乱动
+### 1. 任务阶段权重失衡：Reach vs. Pull
+* **现象**：末端执行器（EE）夹住书本后停止动作。
+* **根源**：任务被分为“接近（Reach）”与“拉出（Pull）”两个阶段。若 Reach 阶段的引导奖励（距离、对齐等）权重过大，而 Pull 阶段（目标追踪、位移）权重过小，Agent 会倾向于停留在接近状态以稳拿高分，失去后续冒险拉出的动力。
+* **对策**：显著提升 Pull 相关项（如 `pulling_object`）的权重，确保后期奖励远高于前期引导奖励。
+
+### 2. 终止条件导致的 Value Loss 爆炸
+* **现象**：增加“书本倒下”的终止条件（Termination）后，Value Loss 飙升至 `inf`。
+* **原理**：在 PPO 中，Critic 网络负责预测长期回报。如果环境突然终止（书本倒下）却没有任何对应的负反馈（惩罚），Critic 会无法理解为什么高分奖励流会瞬间中断，导致预测偏差剧烈震荡。
+* **对策**：**保持奖励连续性**。在设置终止条件的同时，必须配套施加显著的负奖励（Penalty），让算法明确感知到“触发该条件是错误的”。
+
+### 3. 任务后期摆动问题
+* **现象**：成功抓取并取出后，EE 大幅度偏转或乱动。
+* **原因**：Curriculum 中的 `joint_vel` 和 `action_rate` 惩罚介入过晚或权重过小，导致 Agent 在完成核心任务后完全无视运动的平滑性。
 ```python
 # Curriculum本身是为了初期训练的流畅，在一定步数之后在增大惩罚项的权重
 @configclass
@@ -692,7 +769,21 @@ class CurriculumCfg:
 
 ```
 
-## 26.1.16
-### Problem：ee取出书本后，机械臂会在goal pose上来回摆动
-- cirrculum里面的num_steps设置可以参考pulling_object的奖励值，这个奖励值如果达到一定大小，说明此时ee可以完成抓取动作，那么就可以施加joint_vel和action_rate的惩罚了。总之前期最好不要对关节速度和动作幅度进行限制，等差不多可以完成夹取了再限制。400steps的时候pulling_object就差不多达到了30左右，因此设置num_steps=400*24，可以再小一点
-- 增加cirrculum线性变化的函数。general_mdp.modify_reward_weight函数只能设置跳变，不太利于agent学习；通过编写mdp.modify_reward_weight_linear函数，实现再一定步数范围之内，让weight线性变化。
+---
+
+## 26.1.16 ｜ curriculum优化
+
+### 1. 惩罚项介入时机的量化参考
+* **策略**：参考核心任务奖励（如 `pulling_object`）的曲线。
+* **逻辑**：当前期奖励达到稳定阈值（说明 Agent 已掌握抓取基本功）时，即为施加运动限制的最佳时机。
+* **计算示例**：若 `pulling_object` 在第 400 次迭代左右达标，则设置 `num_steps = 400 * num_steps_per_env`（如 $400 \times 24$）。
+
+
+### 2. 从跳变到线性插值（Smoothing）
+* **现状**：原生的 `modify_reward_weight` 函数执行权重突变（Step Change），容易造成策略抖动。
+* **改进**：自研 `modify_reward_weight_linear` 函数。
+* **优势**：
+    * **平滑过渡**：在设定的步数区间内（如从 6000 到 20000 步）线性增加惩罚。
+    * **学习稳定性**：给 Agent 留出适应“运动限制”的时间缓冲区，避免因突然增加的惩罚导致已学到的抓取策略崩溃。
+
+![RL_26.1.16](Picture/RL_260116_01.png "RL_26.1.16")
