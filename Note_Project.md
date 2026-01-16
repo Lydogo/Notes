@@ -584,7 +584,7 @@ from . import config
 - 增加了两个奖励函数：----方便夹爪调整姿态进行夹取
   1.引导平行奖励：让ee的x轴与向量平行
   2.引导垂直奖励：让ee的z轴与向量垂直
-- 增加了这两个奖励函数后出现的现象：当ee举起了物体，夹爪依旧会为了这两个奖励项调整姿态，具体表现为机械臂疯狂抖动+以不自然角度扭曲
+- 增加了这两个奖励函数后出现的现象：当ee举起了物体，夹爪依旧会为了这两个奖励项调整姿态，具体表现为机械臂疯狂抖动+以不自然角度扭曲，这也有可能是joint_vel和action_rate的惩罚项过于小导致的
   改进思路：
   1.增加平滑过渡+线性插值，使得物体被举高后这两个奖励函数就不再生效
   2.修改奖励机制，有没有可能让夹爪去和世界坐标系对齐，而不是物体的属性，因为物体的向量会改变
@@ -667,3 +667,32 @@ relative_x = object.data.root_pos_w[:, 0] - env.scene.env_origins[:, 0]
 
 is_pulled = relative_x < (0.8 - minimal_distance)
 ```
+
+## 26.1.15
+### Problem：ee夹住书本不动的现象
+- 主要是权重分配的问题，整个运动过程可以分为两部分：reach & pull。Reach包括：object_ee_distance、object_ee_centering、ee_alignment_to_vector这几个奖励函数用于引导ee靠近书本；Pull包括：pulling_object、object_goal_tracking这几个奖励函数用于奖励agent夹住并取出。实践发现，Pull部分的权重必须远大于Reach，这样agent才有动力夹住书本并取出
+
+### Problem：增加书本倒下的终止条件后训练过程中Value Loss突然增大至inf
+- 增加了书本重心低于一定高度的终止条件，但是没有配套书本倒下就要扣分作为惩罚项目，导致书本倒下终止环境，critic不理解为什么上一秒还有高分，下一面奖励完全消失了。PPO中要尽量避免奖励的不连续性
+
+### Problem：成功抓取，但是ee取出书本后，会进行大幅度偏转
+- 一开始把curriculum里面的joint_vel和action_rate权重调的太小了，导致agent并不在意关节速度和动作幅度的惩罚，因此到达目标位置后也会乱动
+```python
+# Curriculum本身是为了初期训练的流畅，在一定步数之后在增大惩罚项的权重
+@configclass
+class CurriculumCfg:
+    """Curriculum terms for the MDP."""
+    action_rate = CurrTerm(
+        func=general_mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 10000}
+    )
+
+    joint_vel = CurrTerm(
+        func=general_mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
+    )
+
+```
+
+## 26.1.16
+### Problem：ee取出书本后，机械臂会在goal pose上来回摆动
+- cirrculum里面的num_steps设置可以参考pulling_object的奖励值，这个奖励值如果达到一定大小，说明此时ee可以完成抓取动作，那么就可以施加joint_vel和action_rate的惩罚了。总之前期最好不要对关节速度和动作幅度进行限制，等差不多可以完成夹取了再限制。400steps的时候pulling_object就差不多达到了30左右，因此设置num_steps=400*24，可以再小一点
+- 增加cirrculum线性变化的函数。general_mdp.modify_reward_weight函数只能设置跳变，不太利于agent学习；通过编写mdp.modify_reward_weight_linear函数，实现再一定步数范围之内，让weight线性变化。
