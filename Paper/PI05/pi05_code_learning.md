@@ -293,7 +293,31 @@ for i, (x, config) in enumerate(zip(xs, configs)):
     x = FFN[i](x)                        # 各自的 FFN
 ```
 
-**关键理解**：两个 expert 在同一个 Transformer 的每一层中**并行运行**，各自有独立的 LayerNorm 和 FFN 权重，但在 Attention 中通过共享 KV 实现跨 expert 的信息交互。Action Expert 的 token 可以 attend 到 PaliGemma 的图像/语言 token，从而获取视觉-语言上下文来生成动作。
+**关键理解**：这**不是**把所有信息"放到同一个向量"里，而是两个独立 Expert 通过**共享 Attention** 做跨模态融合。具体机制：
+
+| | Expert 0 (PaliGemma) | Expert 1 (Action Expert) |
+|---|---|---|
+| 模型 | Gemma 2B | Gemma 300M |
+| 处理内容 | 图像 + 语言（prefix） | state + actions（suffix） |
+| adaRMSNorm | 不使用 | 使用（注入 timestep） |
+| 参数 | Q/K/V/FFN 各自独立 | Q/K/V/FFN 各自独立 |
+
+两个 Expert 各自用独立权重计算 Q/K/V，然后 **concat 到一起** 做统一的 Attention 计算：
+
+```python
+# 两个 Expert 各自算 Q/K/V，然后 concat
+q = concat(expert0_q, expert1_q)
+k = concat(expert0_k, expert1_k)
+v = concat(expert0_v, expert1_v)
+# 统一做 attention
+attn_output = attention(q, k, v, mask)
+# 再按 Expert 的 token 数量切分回各自的 FFN
+expert0_out, expert1_out = split(attn_output)
+expert0_out = expert0_ffn(expert0_out)  # 各自独立的 FFN
+expert1_out = expert1_ffn(expert1_out)
+```
+
+这样 Action Expert 的 token 可以 attend 到 PaliGemma 的图像/语言 token，实现跨模态信息融合，同时两个 Expert 的 FFN 参数保持隔离——这就是论文中"knowledge insulation"的核心实现。
 
 ### 2.3 Token 序列拼接：prefix 与 suffix
 
@@ -389,6 +413,20 @@ def _gated_residual(x, y, gate):
     return x + y * gate        # 门控残差（π₀.₅），gate 由时间步控制
 ```
 
+#### ⚠️ 概念辨析：adaRMSNorm ≠ 数据归一化
+
+这两个"归一化"名字相似，但功能完全不同：
+
+| | 数据归一化 (`Normalize`) | Adaptive RMSNorm (`adaRMSNorm`) |
+|---|---|---|
+| **位置** | 模型**外部**，数据预处理阶段 | 模型**内部**，每个 Transformer 层 |
+| **执行时机** | 数据送入模型**之前** | 前向传播的**每一层** |
+| **输入** | 用 `compute_norm_stats.py` 预计算的 mean/std/q01/q99 | flow matching 的 timestep `t` |
+| **作用** | 把 state 和 actions 映射到统一的数值范围（如 `[-1, 1]`） | 把去噪进度 `t` 注入到 Action Expert 的每一层中 |
+| **类比** | 数据工程：让不同量纲的数据可比 | 条件生成：让模型知道当前处于去噪的哪一步 |
+
+简单来说：**norm_stats 管的是"把数据映射到合理的数值范围"，adaRMSNorm 管的是"告诉模型当前去噪进行到哪一步了"**。
+
 ### 2.5 注意力掩码设计：谁能看到谁
 
 `make_attn_mask` 通过 `ar_mask` 构建灵活的注意力模式：
@@ -411,7 +449,30 @@ def _gated_residual(x, y, gate):
 | 动作 → 图像/语言 | ❌ 不可见 | 感知不应被当前噪声动作污染 |
 | 动作 ↔ 动作 | ✅ 双向 | 动作序列内部需要协调 |
 
-### 2.6 训练与推理的前向传播对比
+### 2.6 训练与推理：Flow Matching 范式（非普通监督学习）
+
+#### ⚠️ 核心区别：这不是直接预测 action
+
+π₀.₅ **不是** 普通的监督学习模型（即 `模型(观测) → 动作`）。它是一个 **Flow Matching** 生成模型，训练目标是学习从噪声到动作的**速度场**：
+
+| | 普通监督学习 | Flow Matching（π₀.₅） |
+|---|---|---|
+| 训练目标 | 直接预测 action | 预测噪声→动作的速度场 v_t |
+| 损失函数 | MSE(predicted_action, true_action) | MSE(v_t, noise - actions) |
+| 推理方式 | 一次前向传播 | 从纯噪声出发，10 步 ODE 积分 |
+| 时间步 t | 无 | t ∈ [0,1]，控制去噪进度 |
+
+训练过程的数学表达：
+
+```
+1. 采样随机噪声 noise ~ N(0, I) 和时间步 t ~ Beta(1.5, 1)
+2. 构造中间状态：x_t = t · noise + (1 - t) · actions     ← t=0 是真实动作，t=1 是纯噪声
+3. 模型预测速度场：v_t = model(x_t, t, observation)
+4. 目标速度：u_t = noise - actions                        ← 从动作到噪声的方向
+5. 损失：MSE(v_t, u_t)
+```
+
+推理时反过来：从纯噪声 t=1 开始，用 Euler ODE 求解器沿速度场逐步积分到 t=0，得到最终 action。
 
 #### 训练（`compute_loss`）
 
@@ -419,9 +480,9 @@ def _gated_residual(x, y, gate):
 # pi0.py 第 189-214 行
 def compute_loss(self, rng, observation, actions, *, train=False):
     noise = normal(actions.shape)
-    time = beta(1.5, 1) * 0.999 + 0.001            # 偏向大 t 采样
-    x_t = time * noise + (1 - time) * actions       # 线性插值
-    u_t = noise - actions                            # 真实速度
+    time = beta(1.5, 1) * 0.999 + 0.001            # 偏向大 t 采样（更多关注高噪声区域）
+    x_t = time * noise + (1 - time) * actions       # 线性插值构造中间状态
+    u_t = noise - actions                            # 真实速度场方向
 
     # prefix + suffix 拼接后做一次完整前向传播
     (prefix_out, suffix_out), _ = self.PaliGemma.llm(
@@ -443,7 +504,7 @@ def sample_actions(self, rng, observation, *, num_steps=10):
     # 第一步：prefix 单独前向，缓存 KV cache
     _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], ...)
 
-    # 第二步：循环 10 步去噪，每次只算 suffix
+    # 第二步：从纯噪声出发，循环 10 步去噪（t: 1 → 0）
     def step(carry):
         x_t, time = carry
         suffix_tokens = embed_suffix(obs, x_t, time)
@@ -453,7 +514,7 @@ def sample_actions(self, rng, observation, *, num_steps=10):
             adarms_cond=[None, adarms_cond],
         )
         v_t = action_out_proj(suffix_out[:, -action_horizon:])
-        return x_t + dt * v_t, time + dt   # 欧拉积分
+        return x_t + dt * v_t, time + dt   # 欧拉积分：沿速度场前进一步
 
     x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))  # t: 1→0
     return x_0
@@ -477,12 +538,13 @@ def sample_actions(self, rng, observation, *, num_steps=10):
 
                     ┌─── PaliGemma (2B) 处理 ───┐
                     │    图像+语言 token          │
-Gemma Transformer   │                            │ ← 共享 Attention KV
-(18层, 共享结构)    │                            │
+Gemma Transformer   │   独立 RMSNorm / FFN       │ ← Q/K/V concat 后
+(18层, 共享结构)    │                            │   统一 Attention 计算
+                    │                            │   再切分回各自 FFN
                     └─── Action Expert (300M) ───┘
                          动作 token
-                         [π₀.₅: adaRMSNorm 注入 time]
-                         [π₀:   时间步拼入 token]
+                         独立 adaRMSNorm / FFN
+                         [adaRMSNorm 注入 timestep t]
 
 输出层
 ────────────────────────────────────────────────────────
@@ -493,7 +555,47 @@ Gemma Transformer   │                            │ ← 共享 Attention KV
   去噪后的动作序列 [batch, 50, 32]
 ```
 
-### 2.8 本步小结
+### 2.8 完整数据流全景：两种"归一化"各在哪里
+
+```
+原始数据（机器人传感器读数）
+    │
+    ▼  ① 数据归一化（模型外部，Normalize）
+    │  用 compute_norm_stats.py 预计算的 mean/std/q01/q99
+    │  state: 原始关节角 → [-1, 1]
+    │  actions: 原始控制量 → [-1, 1]
+    │
+    ▼  归一化后的 state / actions
+    │
+    ├──────────────────────────────────────────────────┐
+    │                                                  │
+    ▼  构造加噪样本（Flow Matching）                   │
+    x_t = t · noise + (1-t) · actions                  │
+    │                                                  │
+    │    images → SigLIP → prefix_tokens ──┐           │
+    │    prompt → Gemma embed ─────────────┤           │
+    │                                      │           │
+    │                                      ├→ concat Q/K/V → 统一 Attention → v_t
+    │                                      │
+    │    state → proj ─────────────────────┤
+    │    x_t → proj ───────────────────────┤
+    │                                      │
+    │    t → time_MLP ─────────────────────┘
+    │         │
+    │         ▼  ② adaRMSNorm（模型内部，每层 Transformer）
+    │         通过 timestep t 生成 scale/shift/gate
+    │         调制 Action Expert 每层的归一化
+    │         → 告诉模型"当前去噪到哪一步了"
+    │
+    ▼
+    Loss = MSE(v_t, noise - actions)
+```
+
+**两种归一化的职责总结**：
+- **数据归一化**（`Normalize`）：模型外部的数据工程，把不同量纲的传感器数据映射到统一数值范围
+- **adaRMSNorm**：模型内部的条件注入机制，把 flow matching 的时间步 `t` 注入到每一层 Transformer 中，让模型感知去噪进度
+
+### 2.9 本步小结
 
 | 概念 | 实现 | 文件位置 |
 |------|------|----------|
