@@ -853,3 +853,38 @@ class CurriculumCfg:
     * **学习稳定性**：给 Agent 留出适应“运动限制”的时间缓冲区，避免因突然增加的惩罚导致已学到的抓取策略崩溃。
 
 ![RL_26.1.16](Picture/RL_260116_01.png "RL_26.1.16")
+
+
+# 超维动力工作记录
+## week1 3.2-3.6
+### paper reading
+Egoscale：用ego数据做pretrain；少量桌面操作数据做midtrain；摇操数据做finetune
+用便宜的数据做预训练，中等数据做midtrain，再用摇操去微调。pretrain的时候全部解冻，做过retarget所以可以全部训；如果不做retarget，就最好冻结action expert，只训练vlm
+
+### PI05模型
+归一化计算到底在算什么？
+compute_norm_stats.py --> norm_stats.json
+norm_stats.json包含两组统计量
+state（机器人当前状态）和 actions（动作指令），每组有 4 个统计值
+| 字段 | 含义 | 计算方式 |
+|------|------|---------|
+| mean | 均值 | 全数据的加权滑动平均 |
+| std | 标准差 | √(E[x²] - E[x]²) |
+| q01 | 第 1 百分位数 | 直方图近似 |
+| q99 | 第 99 百分位数 | 直方图近似 |
+本质就是：每个关节的角度范围不一样。 有些数值波动差了几百倍。如果直接喂给模型，模型的 loss 和梯度会被波动大的维度"绑架"，波动小的维度信号太弱，学不到。归一化就是把每个维度都除以自己的标准差，拉到同一个尺度上，让模型能"平等地"关注每一个关节。
+
+## week2~week3 3.9-3.20
+### paper reading
+Egoscale三阶段训练流程：
+
+![EgoScale训练流程](Picture/20260323-153824.jpg)
+
+- **Pre-train**（1000+ hours）：大量第一人称人类操作视频（Ego-centric view & Whole-body pose），学习视觉语义理解和运动先验
+- **Mid-train**（50 hours）：多任务混合数据——UMI gripper数据、Mocap手套数据、Robot数据。在这一阶段引入机器人相关数据，桥接人类动作和机器人动作的gap
+- **Post-train**（~2 hours）：少量遥操作机器人数据做微调，适配具体的灵巧操作任务（Dexterous manipulation）和移动操作任务（Loco-manipulation）
+
+关于pretrain阶段的评估问题（参考Ψ₀论文）：pretrain只训练VLM的语义理解能力，输出的是task space表示（手腕位姿+指尖坐标），无法直接部署到机器人上测试。评估pretrain是否有用只能通过**下游消融实验间接证明**——跑完整pipeline后对比有/无pretrain的最终成功率（Ψ₀中：无pretrain 2/10 → 有pretrain 6/10）。这种评估方式的局限在于：无法区分提升来自"运动先验"还是仅仅"更好的视觉特征"或"参数暖启动"
+
+### 视频人脸模糊pipeline搭建
+insight模型--检测人脸并进行模糊--工程化问题：阿里云服务区A100没有计算卡
