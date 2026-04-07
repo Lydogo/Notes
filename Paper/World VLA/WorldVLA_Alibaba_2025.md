@@ -72,7 +72,10 @@
 
 动作模型接收文本指令和历史图像，输出动作序列：
 
-$$\text{[BOS]}\{text\}\text{[BOI]}\{image\}^M\text{[EOI][EOS][BOA]}\{action\}^K\text{[EOA][EOS]}$$
+```
+[BOS] {text} [BOI] {image}×M [EOI] [EOS] [BOA] {action}×K [EOA] [EOS]
+                                                ╰─── Laction ───╯
+```
 
 其中 $M$ 是输入图像数（默认 2 帧），$K$ 是输出动作步数（chunk size，默认 5 或 10）。只对动作 token 计算损失 $L_{\text{action}}$。
 
@@ -80,7 +83,10 @@ $$\text{[BOS]}\{text\}\text{[BOI]}\{image\}^M\text{[EOI][EOS][BOA]}\{action\}^K\
 
 世界模型接收当前图像和动作，预测下一帧图像：
 
-$$\text{[BOS]}\{text\}\text{[BOI]}\{image\}\text{[EOI][BOA]}\{action\}\text{[EOA][EOS][BOI]}\{image\}\text{[EOI][EOS]}$$
+```
+[BOS] {text} [BOI] {image} [EOI] [BOA] {action} [EOA] [EOS] [BOI] {image} [EOI] [EOS]
+                                                              ╰──── Lworld ────╯
+```
 
 预测过程重复 $N$ 次（默认 $N=1$），只对生成的图像 token 计算损失 $L_{\text{world}}$。
 
