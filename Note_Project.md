@@ -888,3 +888,89 @@ Egoscale三阶段训练流程：
 
 ### 视频人脸模糊pipeline搭建
 insight模型--检测人脸并进行模糊--工程化问题：阿里云服务区A100没有计算卡
+
+
+## 4月记录
+
+### PI0 训练流程笔记
+
+PI0 是视觉-语言-动作（VLA）模型，将机器人控制转化为条件生成问题，基于 Flow Matching 学习从噪声到目标动作的向量场。
+
+**模型架构概览**
+
+- **Prefix 侧**：SigLIP 编码图像 → image embedding；Gemma-2B 词嵌入 → language embedding
+- **Suffix 侧**：state_proj → 状态 embedding；action_in_proj + time MLP → 动作+时间 embedding
+- **联合 Transformer**：Gemma-2B 处理 prefix，Gemma-300m 处理 suffix，共享 attention、独立 FFN
+- **输出**：action_out_proj → 预测向量场 v_t
+
+#### 1. 数据与 Flow Matching 准备
+
+- `observation` 包含图像 `[B,3,224,224]`、关节状态 `[B,16]`、语言 token
+- `actions` 形状 `[B,50,16]`（50 步动作序列，16 维关节）
+- 采样高斯噪声 `noise ~ N(0,1)`，时间步 `time ~ Beta(1.5,1.0)` 缩放到 [0.001, 1.0]
+- 线性插值：`x_t = time * noise + (1 - time) * actions`
+- 真实向量场：`u_t = noise - actions`（模型的学习目标）
+
+time 接近 0 表示接近目标动作，接近 1 表示接近纯噪声。Beta(1.5,1.0) 偏向小值，让模型更多在"接近目标"的区域训练。
+
+#### 2. Prefix Embedding（图像 + 语言）
+
+- SigLIP：Conv2d patch embedding（float32）→ 位置编码（float32）→ cast bf16 → 12 层 Transformer → 输出 `[B,256,dim]` bf16
+- 语言：Gemma-2B embed_tokens（bf16）→ 乘 sqrt(dim) 缩放
+- 拼接后 attention mask 全 0 = 双向注意力，图像和语言互相可见
+
+patch_embedding 和 position_embedding 保持 float32，因为是图像信息进入模型的第一个瓶颈，精度损失会传播到所有后续层。
+
+#### 3. Suffix Embedding（状态 + 动作 + 时间）
+
+- 状态：Linear(16 → width)，float32
+- 时间：正弦位置编码将标量 time ∈ [0,1] 编码为高维向量
+- 动作：action_in_proj(x_t pad 到 32 维) → 与 time_emb 拼接 → MLP（Linear → SiLU → Linear）融合
+- suffix attention mask 实现 causal：state 和 action 各 token 只能看到自身及之前的 token
+
+#### 4. Transformer 联合前向
+
+attention mask 结构：prefix 内部双向互看；suffix 可看所有 prefix 但自身 causal；prefix 不可看 suffix。
+
+双专家机制：每层中 prefix 和 suffix 各用自己的 Q 投影，但共享 KV 做 attention；FFN 各自独立。关键数值稳定措施——Softmax 强制 float32、RoPE float32 计算三角函数、RMSNorm float32 计算方差。
+
+#### 5. 损失计算与反向传播
+
+```
+suffix_out → cast float32 → action_out_proj → v_t [B,50,32]
+loss = MSE(u_t, v_t)   # float32 下计算，避免 bf16 平方溢出
+loss.backward()
+```
+
+v_t 应逼近 u_t = noise - actions，即模型学会在任意噪声水平下如何从当前状态走向目标动作。
+
+#### 6. 梯度裁剪 + AdamW 更新
+
+- `clip_grad_norm_`：全局 L2 范数超过 max_norm=1.0 时等比例缩小所有梯度
+- AdamW（β1=0.9, β2=0.95, ε=1e-8, wd=1e-10）
+
+精度影响：bf16 参数下 m/v 只有 2-3 位有效数字，lr=2.5e-5 时微小更新会被吞掉（1.0 + 2.5e-7 = 1.0）；fp32 参数下更新被正确保留（1.0 + 2.5e-7 = 1.00000025）。
+
+#### 7. 学习率调度
+
+前 1000 步线性 warmup 到 peak_lr=2.5e-5，之后 cosine decay 到 end_lr=2.5e-6。
+
+#### 8. 推理：Euler ODE 求解
+
+从纯噪声 x（t=1）出发，分 10 步沿模型预测的向量场走回 t=0：`x = x - dt * v_t`，最终 x 即为生成的动作序列。
+
+#### 完整流程总结
+
+```
+数据加载 (fp32)
+  → 采样 noise + time (fp32)
+  → 构造 x_t 和目标 u_t (fp32)
+  → SigLIP 编码图像 (fp32→bf16)
+  → Gemma 词嵌入 (bf16)
+  → state/action/time 编码 (fp32)
+  → 统一 cast bf16 进 Transformer
+  → 双专家 Transformer (bf16, 关键算子 fp32)
+  → 输出 cast fp32 → action_out_proj → v_t
+  → MSE loss (fp32) → backward → clip_grad → AdamW.step
+  → 定期保存 checkpoint
+```
