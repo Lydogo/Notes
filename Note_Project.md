@@ -974,3 +974,11 @@ v_t 应逼近 u_t = noise - actions，即模型学会在任意噪声水平下如
   → MSE loss (fp32) → backward → clip_grad → AdamW.step
   → 定期保存 checkpoint
 ```
+#TODO
+### pico ego pipeline 
+对PICO第一人称视角数据进行处理，包括切分标注、质量检测、转换、生成lerobot
+
+#TODO
+### pi05 多节点多卡训练--修正浮点数精度问题导致的loss曲线偏差
+
+
