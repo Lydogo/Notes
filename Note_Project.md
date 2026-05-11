@@ -981,4 +981,8 @@ v_t 应逼近 u_t = noise - actions，即模型学会在任意噪声水平下如
 #TODO
 ### pi05 多节点多卡训练--修正浮点数精度问题导致的loss曲线偏差
 
-
+#TODO
+### pi05；训练参数
+#export XLA_PYTHON_CLIENT_ALLOCATOR=platform
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+原因是我同时设置了这两个环境变量，platform相当于用多少分配多少会有波动，导致 0.9不生效，现在统一改成预先分配0.9来训，看看最后效果能否一致
