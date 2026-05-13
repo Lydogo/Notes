@@ -982,7 +982,130 @@ v_t 应逼近 u_t = noise - actions，即模型学会在任意噪声水平下如
 ### pi05 多节点多卡训练--修正浮点数精度问题导致的loss曲线偏差
 
 #TODO
+### pi05：`state=上一帧 action` 与 `discrete_state_input` 的区别
+
+这两个概念完全正交，分别作用在不同层面，不能互相替代。
+
+#### 1. `discrete_state_input` 控制的是 state 的编码方式
+
+`discrete_state_input` 决定的是 state 怎么喂给模型，和 state 字段里面具体放什么内容无关。
+
+- `discrete_state_input=True`（pi05 默认）：state 走文本 token 路径。tokenizer 会把 state 离散化成整数序列，然后拼到 prompt 文本中，例如 `Task: xxx, State: 12 87 200 ...; Action:`。
+- `discrete_state_input=False`（pi0 默认，也是当前 `pi05_pico` 显式设置）：state 走连续向量路径。state 经过 `state_proj` 线性投影，变成一个连续 token，拼到 action expert 的 suffix 里。
+
+需要注意的是，`pi05_pico` 当前配置是 `pi05=True` 且 `discrete_state_input=False`，这是一个非默认组合：模型仍是 pi05，但 state 使用连续投影路径。具体默认逻辑在 `pi0_config.py` 里：如果 `discrete_state_input is None`，才会被设置成 `pi05`。
+
+#### 2. `state=上一帧 action` 改的是数据语义
+
+把 `state[t]` 的内容从"当前本体感知"改成 `action[t-1]`，改变的是 state 字段里装的是什么数值，不改变模型怎么编码 state。
+
+也就是说：
+
+| 维度 | 选项 A | 选项 B |
+|---|---|---|
+| state 内容（数据侧） | 当前 proprioception | `action[t-1]` |
+| state 编码（模型侧） | `discrete_state_input=True`：离散文本 token | `discrete_state_input=False`：连续向量投影 |
+
+因此可以任意组合：
+
+- pi05 标准：当前 proprioception + 离散文本 state。
+- 当前 `pi05_pico`：当前 proprioception + 连续向量 state。
+- 想尝试的方案：`action[t-1]` + 连续向量 state。
+- 也可以是：`action[t-1]` + 离散文本 state。
+
+#### 3. 实操建议
+
+如果目标是"用上一步 action 当 state"，应该改数据侧，而不是改 `discrete_state_input`：
+
+- 推荐在数据 transform 链路里增加一步 `RepackTransform` 或自定义 transform，把 `state` 字段替换成 `action[t-1]`。在 LeRobot dataset 层面或者 `LeRobotPicoEgoDataConfig` 的 `repack_transforms` 里都可以做。
+- 注意首帧没有 `t-1` 时，需要用零向量或者第 0 帧 action 自身填充。
+- 维度上，当前数据里的 state 和 action 维度一致，所以可以直接替换。不过要确认 `norm_stats`：原本 state 和 action 各自有 mean/std，如果实际 state 分布改成 action 分布，应该用 action 的 norm stats 给替换后的 state 归一化，否则模型看到的输入分布会偏。
+
+简单总结：`discrete_state_input` 改的是"state 这个张量怎么进模型"，而"上一帧 action 当 state"改的是"state 这个张量里放什么数"。两者不冲突，也不互相替代。
+
+#TODO
 ### pi05；训练参数
 #export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 原因是我同时设置了这两个环境变量，platform相当于用多少分配多少会有波动，导致 0.9不生效，现在统一改成预先分配0.9来训，看看最后效果能否一致
+
+#TODO
+### FAST tokenizer 原理
+FAST 先对动作做离散余弦变换（DCT）——把时序信号从时域转到频域，因为机器人动作的高频分量很小，可以直接丢掉；然后对剩下的低频系数做字节对编码（BPE），得到一个有限的 "动作词表"（类似 LLM 的词表，只是这个词表里的每个 token 代表一段动作的某种"模式"）。
+
+#TODO
+### OSS FUSE 写 MP4 时 moov atom 丢失的根本原因
+
+**问题现象**：用 ffmpeg / cv2.VideoWriter 直接把 mp4 写入挂载的 OSS FUSE 路径（`/mnt/pico_data`）时，文件能写出但播放器打不开、ffprobe 报错、moov atom 缺失。典型报错：
+- `ffmpeg returncode=234: Error writing trailer: Invalid argument`
+- cv2.VideoWriter close 后输出文件无 moov（"cannot open"）
+
+#### 1. MP4 容器结构
+
+MP4 由若干 box / atom 组成，关键的两个：
+
+| atom | 内容 | 大小 | 写入时机 |
+|---|---|---|---|
+| `mdat` | 实际编码后的视音频数据 | 占整文件 >99% | 编码过程中顺序追加 |
+| `moov` | 元数据索引：每帧的偏移、时长、编解码参数等 | 几 KB ~ 几 MB | 全部帧编码完成后才能计算出（因为依赖每个 sample 的偏移） |
+
+标准写入流程（ffmpeg / OpenCV / 几乎所有 muxer 默认）：
+1. 打开输出文件，预留 `mdat` 头部
+2. 顺序 append 每一帧到 `mdat`
+3. 关闭时构建 `moov`，写到文件末尾
+4. **`seek(0)`，把 `moov` 移到文件开头（"faststart"重排）**，或用占位符提前预留位置回头 seek 进去写
+
+> 关键：第 4 步必须 seek 到已写入的偏移位置覆盖重写。
+
+#### 2. OSS FUSE 的硬约束
+
+`/mnt/pico_data` 是阿里云 ossfs2 把 OSS 对象存储挂载成 POSIX 文件系统的产物。**OSS 对象本身是不可变的**（PutObject 是原子全量写），ossfs2 用 multipart upload 在写入时模拟"追加"：
+
+- ✅ 顺序写（一直 append，永不回头） → 走 multipart upload，OK
+- ✅ read（走 GetObject Range），OK
+- ❌ **seek + write**（已写过的偏移再回头改） → OSS 不支持"对象局部更新"，ossfs2 也没有完整的本地缓存来支持随机写
+
+所以 OSS FUSE 上 cv2 / ffmpeg 写 mp4 时，到了第 4 步 `seek + write moov` 那一刻就会失败。表现：文件确实存在，但 ffprobe 打不开 / 大小异常 / 没有帧索引。
+
+#### 3. 为什么"打开就能播"的 mp4 还能写成功？
+
+存在两种"避开 seek"的写法，但需要 muxer 显式支持：
+
+| 写法 | 原理 | 谁支持 |
+|---|---|---|
+| `-movflags +faststart`（默认） | 末尾写完 moov 后 seek 到头部插入，**仍然需要 seek** | 失败 |
+| `-movflags +empty_moov+default_base_moof`（fragmented mp4 / fMP4） | 把 moov 拆成多个 moof 片段，与 mdat 交错顺序写，**无 seek** | ffmpeg 支持，但 cv2.VideoWriter 不暴露此选项 |
+| 先全部写到内存/磁盘，最后整体上传 | muxer 在本地完成，再把成品当一次性数据流写 OSS | 我们采用的 staged 方案 |
+
+cv2.VideoWriter 调的是底层 ffmpeg muxer，**没有把 fragmented 选项透出来**，因此走默认路径 → 必然 seek → 必然失败。
+
+#### 4. 项目里踩过的具体场景
+
+| 场景 | 直接写 OSS FUSE | 现象 |
+|---|---|---|
+| `face_blur` 用 ffmpeg 写 `_blurred.mp4` | ❌ | `Error writing trailer: Invalid argument` (returncode=234) |
+| `VideoSplitRefiner` 用 ffmpeg crop split | ❌ | 同上 |
+| `visualize_joints_and_annotations.py` 用 cv2.VideoWriter | ❌ | `Temp output validation failed`（cannot open） |
+| 顺序 `cp` 一个已经写好的完整 mp4 到 OSS | ✅ | 正常（ossfs2 走 multipart upload） |
+| `cv2.VideoCapture` 顺序读 mp4 | ✅ | 正常 |
+
+#### 5. 项目采用的解决方案：staged writer
+
+统一模式：
+
+```
+[ encoder ] → 本地高速 FS（tmpfs /dev/shm 或 CPFS）→ 完整 mp4
+                            ↓ sequential cp
+                    OSS FUSE refined/
+```
+
+实现位置：
+- `python/staged_writer.staged_oss_output`：context manager，封装 tmp 写 + sequential copy
+- `python/refiners/video_split_refiner.py`、`face_blur` 等 refiner：通过 `staged_oss_output` 包装 ffmpeg 输出
+- 本次 visualize 任务：用 shell 把 `--output_dir` 指到本地 CPFS，结束后 `cp` 到 `/mnt/pico_data/<rel>/refined/`
+
+`cp` 之所以可行：它是**顺序 read + write**，对 OSS FUSE 来说就是把整个文件作为一次 multipart upload 写出，全程无 seek。
+
+#### 6. 一句话总结
+
+> MP4 容器要求把元数据（moov atom）写到文件首部（或末尾后再 seek 回头），而 OSS FUSE 底层是不可变对象存储，**只能顺序写，不支持回头改**。所以任何"直接把 ffmpeg / cv2.VideoWriter 输出目标设在 `/mnt/pico_data` 下"的写法都会在 close 阶段失败 —— 解决办法是先把完整 mp4 写到本地 FS，再用 `cp` 一次性顺序上传。
