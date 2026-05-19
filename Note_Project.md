@@ -870,39 +870,13 @@ class CurriculumCfg:
 为什么需要：每个关节的角度范围相差几百倍，直接喂给模型会让 loss 和梯度被波动大的维度主导，波动小的维度信号被淹没。归一化把每个维度除以自己的标准差拉到同一尺度，让模型对每个关节同等关注。
 
 ### 2. `compute_norm_stats.py` 计算速度优化
-
-`compute_norm_stats_v2.py` 相对原版做了 1 个核心性能优化 + 3 个小改进 + 1 个功能裁剪。
-
-#### 2.1 核心优化：跳过视频解码
+**核心优化：跳过视频解码**
 
 `compute_norm_stats` 只需要 `state` 和 `actions` 的统计量，根本用不到图像；但 v1 直接复用 `LeRobotDataset`，每次取样都会走 `_query_videos` 把对应帧的 mp4 解码出来，纯属浪费 CPU。
 
 v2 的思路是用一个子类覆盖 `_query_videos`，让它直接返回与真解码同 shape 的全零张量。下游 `RepackTransform` / `AlohaInputs` / `DeltaActions` 等 transform 看到的 dict 结构和维度跟原来完全一致，不需要任何改动；而图像本来就是 transform pipeline 的旁路，不参与 `state`/`actions` 的统计，因此 `norm_stats` 数值结果与 v1 同分布，是纯加速优化。
 
 实测提速：`pico_ego_V7` 是 av1 编码、1536×2048 视频，mp4 解码极吃 CPU，v1 在 8-worker 下几乎是 CPU-bound；v2 只读 parquet，全量遍历 1500w 帧从 6–10 小时压到 1 小时以内（5–10×）。
-
-#### 2.2 三个小改进
-
-- 显式 `download_videos=False`：防止 `LeRobotDataset` 启动时尝试从 HF Hub 拉视频文件，本地数据场景下行为更显式。
-- 新增 `--output-name` 选项：v1 输出路径写死为 `assets_dirs / repo_id`；v2 可以指定其他名字把结果写到别处做对比，不覆盖已有。
-- 日志清理：v1 用中文 `print` + emoji；v2 全英文 + 明确的 `Writing stats to:` / `Done!` 收尾。
-
-#### 2.3 功能裁剪：去掉 RLDS 路径
-
-v1 支持 torch dataset 或 RLDS dataset（DROID 等）两条分支；v2 直接拒绝 RLDS 并报错指引回 v1。原因是 v2 的视频跳过依赖 `LeRobotDataset._query_videos` 这个钩子，RLDS 走完全不同的 pipeline，复用不了。
-
-#### 2.4 对比一览
-
-| 维度 | v1 | v2 |
-|---|---|---|
-| 视频解码 | 真解码（CPU bound） | 零张量替代（仅读 parquet） |
-| 速度（V7 全量） | 6–10 小时 | 1 小时以内 |
-| `download_videos` | 默认 | `False` 显式禁 |
-| 输出路径自定义 | 不支持 | `--output-name` |
-| RLDS 数据集 | 支持 | 不支持（明确报错） |
-| 日志 | 中文 + emoji | 英文 |
-| 适用数据集 | LeRobot + RLDS | 仅 LeRobot |
-| `norm_stats` 数值 | — | 与 v1 同分布（纯加速，无精度损失） |
 
 
 ## PI0 训练流程笔记
@@ -983,8 +957,16 @@ Loss：`L = E[||v_θ(x_τ, τ, condition) - u_τ||²]`。
 
 #### 3.1 输入
 
-- `observation`：多视角图像 `[B, 3, 224, 224]`、关节状态 `[B, 16]`、语言 token。
-- `actions`：`[B, 50, 16]`，即 50 步 action chunk × 16 维关节。
+> 以下以 PI0 论文默认的**双臂场景**（如 Franka 双臂 / Aloha-AgileX）为例，state/action 都是 **16 维**；不同 embodiment 维度不同，但 openpi 实现里都会被 pad 到 `max_state_dim = max_action_dim = 32` 统一进 Transformer（这也是 3.5 节输出为 `[B, 50, 32]` 的原因）。
+
+- `observation`：
+  - **图像** `[B, V, 3, 224, 224]`：V 个视角的 RGB（典型双臂配置 V=3：head + 左 wrist + 右 wrist），每张 224×224 给 SigLIP；
+  - **state** `[B, 16]`：当前本体感觉（proprioception），双臂 = 左臂 7 joint pos（关节角度，单位 rad）+ 1 gripper（开合 0/1 或归一化连续值）+ 右臂 7 joint pos + 1 gripper；
+  - **language tokens** `[B, L]`：任务指令（如 "pick up the red cup"），经 Gemma tokenizer 编码。
+
+- `actions` `[B, 50, 16]`：未来 H=50 步的 **action chunk**，每一步同样 16 维（双臂 joint + gripper）。action 一般用**绝对 joint 目标**或 **delta joint**（取决于具体配置）；gripper 维度一般是 0/1 开合或归一化连续开度。
+
+> 关于 16 维到 32 维的 padding：进入 `action_in_proj` 前，会把 16 维零填充到 32 维（`max_action_dim`），这样同一个 PI0 模型可以无缝吃不同 embodiment 的数据（单臂 7 维、Franka 双臂 16 维、Aloha-AgileX 14 维等），只在最后做 action 时按真实维度截断。state 也是同样的 pad 处理。
 
 #### 3.2 Prefix Embedding（图像 + 语言）
 
