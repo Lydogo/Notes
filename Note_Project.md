@@ -855,379 +855,442 @@ class CurriculumCfg:
 ![RL_26.1.16](Picture/RL_260116_01.png "RL_26.1.16")
 
 
-# 超维动力工作记录
-## week1 3.2-3.6
-### paper reading
-Egoscale：用ego数据做pretrain；少量桌面操作数据做midtrain；摇操数据做finetune
-用便宜的数据做预训练，中等数据做midtrain，再用摇操去微调。pretrain的时候全部解冻，做过retarget所以可以全部训；如果不做retarget，就最好冻结action expert，只训练vlm
+# 超维动力工作总结
+## PI05 归一化统计
+### 1. norm_stats 是什么
+`compute_norm_stats.py` 会输出 `norm_stats.json`，包含 `state`（机器人当前状态）和 `actions`（动作指令）两组统计量，每组 4 个值：
 
-### PI05模型
-归一化计算到底在算什么？
-compute_norm_stats.py --> norm_stats.json
-norm_stats.json包含两组统计量
-state（机器人当前状态）和 actions（动作指令），每组有 4 个统计值
 | 字段 | 含义 | 计算方式 |
-|------|------|---------|
-| mean | 均值 | 全数据的加权滑动平均 |
-| std | 标准差 | √(E[x²] - E[x]²) |
-| q01 | 第 1 百分位数 | 直方图近似 |
-| q99 | 第 99 百分位数 | 直方图近似 |
-本质就是：每个关节的角度范围不一样。 有些数值波动差了几百倍。如果直接喂给模型，模型的 loss 和梯度会被波动大的维度"绑架"，波动小的维度信号太弱，学不到。归一化就是把每个维度都除以自己的标准差，拉到同一个尺度上，让模型能"平等地"关注每一个关节。
+|---|---|---|
+| `mean` | 均值 | 全数据加权滑动平均 |
+| `std` | 标准差 | √(E[x²] - E[x]²) |
+| `q01` | 第 1 百分位数 | 直方图近似 |
+| `q99` | 第 99 百分位数 | 直方图近似 |
 
-## week2~week3 3.9-3.20
-### paper reading
-Egoscale三阶段训练流程：
+为什么需要：每个关节的角度范围相差几百倍，直接喂给模型会让 loss 和梯度被波动大的维度主导，波动小的维度信号被淹没。归一化把每个维度除以自己的标准差拉到同一尺度，让模型对每个关节同等关注。
 
-![EgoScale训练流程](Picture/20260323-153824.jpg)
+### 2. `compute_norm_stats.py` 计算速度优化
 
-- **Pre-train**（1000+ hours）：大量第一人称人类操作视频（Ego-centric view & Whole-body pose），学习视觉语义理解和运动先验
-- **Mid-train**（50 hours）：多任务混合数据——UMI gripper数据、Mocap手套数据、Robot数据。在这一阶段引入机器人相关数据，桥接人类动作和机器人动作的gap
-- **Post-train**（~2 hours）：少量遥操作机器人数据做微调，适配具体的灵巧操作任务（Dexterous manipulation）和移动操作任务（Loco-manipulation）
+`compute_norm_stats_v2.py` 相对原版做了 1 个核心性能优化 + 3 个小改进 + 1 个功能裁剪。
 
-关于pretrain阶段的评估问题（参考Ψ₀论文）：pretrain只训练VLM的语义理解能力，输出的是task space表示（手腕位姿+指尖坐标），无法直接部署到机器人上测试。评估pretrain是否有用只能通过**下游消融实验间接证明**——跑完整pipeline后对比有/无pretrain的最终成功率（Ψ₀中：无pretrain 2/10 → 有pretrain 6/10）。这种评估方式的局限在于：无法区分提升来自"运动先验"还是仅仅"更好的视觉特征"或"参数暖启动"
+#### 2.1 核心优化：跳过视频解码
 
-### 视频人脸模糊pipeline搭建
-insight模型--检测人脸并进行模糊--工程化问题：阿里云服务区A100没有计算卡
+`compute_norm_stats` 只需要 `state` 和 `actions` 的统计量，根本用不到图像；但 v1 直接复用 `LeRobotDataset`，每次取样都会走 `_query_videos` 把对应帧的 mp4 解码出来，纯属浪费 CPU。
+
+v2 的思路是用一个子类覆盖 `_query_videos`，让它直接返回与真解码同 shape 的全零张量。下游 `RepackTransform` / `AlohaInputs` / `DeltaActions` 等 transform 看到的 dict 结构和维度跟原来完全一致，不需要任何改动；而图像本来就是 transform pipeline 的旁路，不参与 `state`/`actions` 的统计，因此 `norm_stats` 数值结果与 v1 同分布，是纯加速优化。
+
+实测提速：`pico_ego_V7` 是 av1 编码、1536×2048 视频，mp4 解码极吃 CPU，v1 在 8-worker 下几乎是 CPU-bound；v2 只读 parquet，全量遍历 1500w 帧从 6–10 小时压到 1 小时以内（5–10×）。
+
+#### 2.2 三个小改进
+
+- 显式 `download_videos=False`：防止 `LeRobotDataset` 启动时尝试从 HF Hub 拉视频文件，本地数据场景下行为更显式。
+- 新增 `--output-name` 选项：v1 输出路径写死为 `assets_dirs / repo_id`；v2 可以指定其他名字把结果写到别处做对比，不覆盖已有。
+- 日志清理：v1 用中文 `print` + emoji；v2 全英文 + 明确的 `Writing stats to:` / `Done!` 收尾。
+
+#### 2.3 功能裁剪：去掉 RLDS 路径
+
+v1 支持 torch dataset 或 RLDS dataset（DROID 等）两条分支；v2 直接拒绝 RLDS 并报错指引回 v1。原因是 v2 的视频跳过依赖 `LeRobotDataset._query_videos` 这个钩子，RLDS 走完全不同的 pipeline，复用不了。
+
+#### 2.4 对比一览
+
+| 维度 | v1 | v2 |
+|---|---|---|
+| 视频解码 | 真解码（CPU bound） | 零张量替代（仅读 parquet） |
+| 速度（V7 全量） | 6–10 小时 | 1 小时以内 |
+| `download_videos` | 默认 | `False` 显式禁 |
+| 输出路径自定义 | 不支持 | `--output-name` |
+| RLDS 数据集 | 支持 | 不支持（明确报错） |
+| 日志 | 中文 + emoji | 英文 |
+| 适用数据集 | LeRobot + RLDS | 仅 LeRobot |
+| `norm_stats` 数值 | — | 与 v1 同分布（纯加速，无精度损失） |
 
 
-## 4月记录
+## PI0 训练流程笔记
 
-### PI0 训练流程笔记
+PI0 / PI0.5 / PI0.7 都是 Physical Intelligence 出的视觉-语言-动作（VLA）模型，把机器人控制建模成"条件生成"问题：给定多视角图像、语言指令和本体状态，输出未来 H 步的连续动作序列。
 
-PI0 是视觉-语言-动作（VLA）模型，将机器人控制转化为条件生成问题，基于 Flow Matching 学习从噪声到目标动作的向量场。
+### 0. 家族总览
 
-**模型架构概览**
+| 模型 | 时间 | 核心改动 |
+|---|---|---|
+| PI0 | 2024.10 | PaliGemma VLM + Action Expert + Flow Matching，10K 小时同质数据 |
+| PI0-FAST | 2025 | 用 FAST tokenizer 把动作离散化成 token，走纯自回归路径 |
+| PI0.5 | 2025.04 | FAST 离散预训练 + flow matching 后训练；异构多源数据联合训练；层次化高低层推理 |
+| PI0.7 | 2026 | Steerable：多模态 prompt（subgoal 图、episode metadata）+ 知识隔离 KI |
 
-- **Prefix 侧**：SigLIP 编码图像 → image embedding；Gemma-2B 词嵌入 → language embedding
-- **Suffix 侧**：state_proj → 状态 embedding；action_in_proj + time MLP → 动作+时间 embedding
-- **联合 Transformer**：Gemma-2B 处理 prefix，Gemma-300m 处理 suffix，共享 attention、独立 FFN
-- **输出**：action_out_proj → 预测向量场 v_t
+### 1. 模型架构：双专家如何与 VLM 交互
 
-#### 1. 数据与 Flow Matching 准备
+#### 1.1 整体结构
 
-- `observation` 包含图像 `[B,3,224,224]`、关节状态 `[B,16]`、语言 token
-- `actions` 形状 `[B,50,16]`（50 步动作序列，16 维关节）
-- 采样高斯噪声 `noise ~ N(0,1)`，时间步 `time ~ Beta(1.5,1.0)` 缩放到 [0.001, 1.0]
-- 线性插值：`x_t = time * noise + (1 - time) * actions`
-- 真实向量场：`u_t = noise - actions`（模型的学习目标）
+- **Prefix 侧（VLM 专家）**：SigLIP 编码图像 → image embedding；Gemma-2B 词嵌入 → language embedding。约 2.7B 参数，从 PaliGemma 初始化。
+- **Suffix 侧（Action Expert）**：`state_proj` → 状态 embedding；`action_in_proj` + time MLP → 动作 + 时间 embedding。Gemma-300m 架构，随机初始化。
+- **输出头**：`action_out_proj` → 预测向量场 `v_t`，shape `[B, 50, action_dim]`。
 
-time 接近 0 表示接近目标动作，接近 1 表示接近纯噪声。Beta(1.5,1.0) 偏向小值，让模型更多在"接近目标"的区域训练。
+#### 1.2 双专家在 Transformer 内的交互方式
 
-#### 2. Prefix Embedding（图像 + 语言）
+PI0 在**同一个 Transformer 内**用两组独立权重（类似 MoE），每一层做的事：
 
-- SigLIP：Conv2d patch embedding（float32）→ 位置编码（float32）→ cast bf16 → 12 层 Transformer → 输出 `[B,256,dim]` bf16
-- 语言：Gemma-2B embed_tokens（bf16）→ 乘 sqrt(dim) 缩放
-- 拼接后 attention mask 全 0 = 双向注意力，图像和语言互相可见
+- **Q / K / V 投影 + FFN 各自独立**（VLM 用 PaliGemma 权重，action expert 用随机初始化的小权重）。
+- 两边的 token **拼成一条序列做联合 self-attention**——action expert 的 Q 可以查到 VLM prefix 的 K/V，把视觉语义"拉过来"。
+- attention 出来之后 FFN 各走各的。
 
-patch_embedding 和 position_embedding 保持 float32，因为是图像信息进入模型的第一个瓶颈，精度损失会传播到所有后续层。
+**信息流向用 attention mask 控制**：
 
-#### 3. Suffix Embedding（状态 + 动作 + 时间）
+| 区块 | 可看见 |
+|---|---|
+| Prefix（image + language） | 仅 Prefix（双向） |
+| State token | Prefix + 自己 |
+| Action tokens | Prefix + state + 全部 action token（action 内部双向） |
 
-- 状态：Linear(16 → width)，float32
-- 时间：正弦位置编码将标量 time ∈ [0,1] 编码为高维向量
-- 动作：action_in_proj(x_t pad 到 32 维) → 与 time_emb 拼接 → MLP（Linear → SiLU → Linear）融合
-- suffix attention mask 实现 causal：state 和 action 各 token 只能看到自身及之前的 token
+prefix 看不到 suffix——信息**单向流向** action expert，不污染 VLM 预训练分布。这也是 prefix KV 可以缓存的原因（10 步 Euler 推理时 prefix 只算一次）。
 
-#### 4. Transformer 联合前向
+PI0.5 / PI0.7 沿用这个双专家骨架，但监督路径有变化：
+- **PI0.5**：VLM 同时通过 FAST 离散动作 token 的交叉熵被监督；action expert token 不去看 FAST token，避免两种动作表示泄漏。
+- **PI0.7（知识隔离 KI）**：action expert 可以 attention 访问 VLM 全部激活，但**梯度不回传到 VLM**。VLM 只由 FAST 离散交叉熵监督，避免连续 flow 损失干扰视觉语言表征。
 
-attention mask 结构：prefix 内部双向互看；suffix 可看所有 prefix 但自身 causal；prefix 不可看 suffix。
+### 2. Flow Matching vs Diffusion
 
-双专家机制：每层中 prefix 和 suffix 各用自己的 Q 投影，但共享 KV 做 attention；FFN 各自独立。关键数值稳定措施——Softmax 强制 float32、RoPE float32 计算三角函数、RMSNorm float32 计算方差。
+两者都是"从噪声生成数据"的连续生成模型，本质都在学一条把高斯分布变换到数据分布的路径，区别在路径设计：
 
-#### 5. 损失计算与反向传播
+| 维度 | Diffusion (DDPM) | Flow Matching |
+|---|---|---|
+| 前向过程 | 反复加噪：`x_t = √α_t · x_0 + √(1-α_t) · ε` | 直线插值：`x_τ = τ·noise + (1-τ)·action` |
+| 学习目标 | 预测噪声 `ε` 或 score `∇log p_t` | 预测向量场 `v_τ = noise - action`（直线方向上的速度） |
+| 数学框架 | SDE / 马尔可夫链 | ODE / 连续归一化流 |
+| 时间步采样 | 一般均匀 | PI0 用 `Beta(1.5, 1.0)` 偏向小 τ |
+| 推理 | DDIM/DPM-Solver，20-50 步 | Euler ODE，PI0 只 10 步 |
+| 训练稳定性 | β/α 调度敏感 | 直线路径更稳，loss 更平 |
+
+#### PI0 的具体实现
+
+构造样本（fp32 算）：
+
+- `noise ~ N(0, I)`，`τ ~ Beta(1.5, 1.0)` 缩放到 `[0.001, 1.0]`。
+- `x_τ = τ · noise + (1 - τ) · actions`。
+- 目标向量场：`u_τ = noise - actions`。
+
+Loss：`L = E[||v_θ(x_τ, τ, condition) - u_τ||²]`。
+
+直觉：`τ → 0` 时 `x_τ ≈ actions`（接近目标），`τ → 1` 时 `x_τ ≈ noise`（接近纯噪声）。`Beta(1.5, 1.0)` 偏向小 τ 是因为接近目标那段决定最终精度，需要重点训。
+
+#### PI0 选 Flow Matching 的理由
+
+- 训练目标更简单（不用复杂噪声调度）。
+- 推理快——10 步 Euler 就收敛，diffusion 一般要 20-50 步。
+- 与机器人 50Hz 控频匹配（4090 上推理 ~73ms）。
+
+### 3. 数据流：从观测到 loss
+
+#### 3.1 输入
+
+- `observation`：多视角图像 `[B, 3, 224, 224]`、关节状态 `[B, 16]`、语言 token。
+- `actions`：`[B, 50, 16]`，即 50 步 action chunk × 16 维关节。
+
+#### 3.2 Prefix Embedding（图像 + 语言）
+
+- SigLIP：Conv2d patch embedding（fp32）→ 位置编码（fp32）→ cast bf16 → 12 层 Transformer → 输出 `[B, 256, dim]` bf16。
+- 语言：Gemma-2B `embed_tokens`（bf16）→ 乘 `sqrt(dim)` 缩放。
+- 拼接后 attention mask 全 0 = 双向，图像和语言互相可见。
+
+`patch_embedding` 和 `position_embedding` 故意保留 fp32：图像信息进入模型的第一个瓶颈，精度损失会传播到所有后续层。
+
+#### 3.3 Suffix Embedding（状态 + 动作 + 时间）
+
+- 状态：`state_proj = Linear(16 → width)`，fp32。
+- 时间：正弦位置编码把标量 `τ ∈ [0, 1]` 编码为高维向量。
+- 动作：`action_in_proj(x_τ pad 到 32 维)` → 与 `time_emb` 拼接 → MLP（`Linear → SiLU → Linear`）融合。
+- Suffix 内部 attention mask 为 causal：state 和 action 各 token 只能看到自身及之前的。
+
+#### 3.4 联合 Transformer 前向
+
+- Attention mask 结构见 1.2。
+- 双专家：每层 prefix/suffix 各算自己的 Q/K/V 后拼起来做联合 attention，FFN 各自独立。
+- 数值稳定关键算子强制 fp32：**Softmax、RoPE 三角函数、RMSNorm 方差**。bf16 下这几个算子会累积明显数值漂移。
+
+#### 3.5 输出与 Loss
 
 ```
-suffix_out → cast float32 → action_out_proj → v_t [B,50,32]
-loss = MSE(u_t, v_t)   # float32 下计算，避免 bf16 平方溢出
+suffix_out → cast fp32 → action_out_proj → v_t [B, 50, 32]
+loss = MSE(u_τ, v_t)        # fp32 下算，避免 bf16 平方溢出
 loss.backward()
 ```
 
-v_t 应逼近 u_t = noise - actions，即模型学会在任意噪声水平下如何从当前状态走向目标动作。
+`v_t` 应逼近 `u_τ = noise - actions`。
 
-#### 6. 梯度裁剪 + AdamW 更新
+### 4. 为什么能输出 Action Chunk
 
-- `clip_grad_norm_`：全局 L2 范数超过 max_norm=1.0 时等比例缩小所有梯度
-- AdamW（β1=0.9, β2=0.95, ε=1e-8, wd=1e-10）
+#### 4.1 chunk 是什么
 
-精度影响：bf16 参数下 m/v 只有 2-3 位有效数字，lr=2.5e-5 时微小更新会被吞掉（1.0 + 2.5e-7 = 1.0）；fp32 参数下更新被正确保留（1.0 + 2.5e-7 = 1.00000025）。
+PI0 一次预测的不是单步动作，而是未来 H=50 步序列 `A_t = [a_t, ..., a_{t+49}]`，叫 **action chunk**。控制时取前 25 步执行，然后下一次推理。
 
-#### 7. 学习率调度
+#### 4.2 架构为什么能支持
 
-前 1000 步线性 warmup 到 peak_lr=2.5e-5，之后 cosine decay 到 end_lr=2.5e-6。
+- Suffix 里直接放 H 个 action token，每个 `action_in_proj` 投影一个时间步的 noisy action。
+- Action 内部双向 attention，可以建模 50 步之间的时序依赖。
+- Flow matching 的向量场输出 shape 天然是 `[B, H, action_dim]`，**一次性预测整个 chunk 的速度场**，没有自回归的串行依赖。
 
-#### 8. 推理：Euler ODE 求解
+对比 OpenVLA：走自回归离散 token，每个时间步都要解一个 token，输出 50 步动作需要 50 次串行 decode，无法满足 50Hz 控频。PI0 论文里 OpenVLA 在灵巧任务上"几乎完全失败"就是这个原因。
 
-从纯噪声 x（t=1）出发，分 10 步沿模型预测的向量场走回 t=0：`x = x - dt * v_t`，最终 x 即为生成的动作序列。
+#### 4.3 推理：10 步 Euler ODE
 
-#### 完整流程总结
+从纯噪声 `x ~ N(0, I)`（`τ=1`）出发，分 10 步沿向量场走回 `τ=0`：
+
+```
+for step in range(10):
+    x = x - dt * v_θ(x, τ, condition)   # dt = 0.1
+    τ -= dt
+```
+
+之所以 10 步够：
+- Flow matching 直线路径收敛快。
+- Prefix KV 可缓存，只算一次；10 步只重复算 suffix 的 attention/FFN。
+- 4090 上总耗时 ~73ms（图像编码 14ms + 观测 forward 32ms + 10 步去噪 27ms）。
+
+### 5. State 表示的两种正交选择
+
+PI 系列里 state 字段有两个完全独立的维度可以调，**不要把它们搞混**：
+
+#### 5.1 编码方式：`discrete_state_input`
+
+控制 **state 怎么进模型**：
+
+- `discrete_state_input=True`（PI0.5 默认）：state 走**文本 token 路径**。tokenizer 把 state 离散化成整数序列拼到 prompt 文本，例如 `Task: xxx, State: 12 87 200 ...; Action:`，跟 task 一起走 VLM bidirectional attention。
+- `discrete_state_input=False`（PI0 默认）：state 走**连续向量路径**。经过 `state_proj` 线性投影变成连续 token 拼到 action expert 的 suffix 里。
+
+实际工程里 `pi05_pico` 当前是 `pi05=True` + `discrete_state_input=False`，这是非默认组合——骨架是 PI0.5，但 state 走 PI0 风格连续投影。
+
+#### 5.2 内容语义：state 字段里装什么
+
+控制 **state 字段里放什么数**，与编码方式无关：
+
+- 当前 proprioception（标准）：state[t] = 当前关节角度。
+- `action[t-1]`（变体）：state[t] = 上一帧的动作指令。
+
+#### 5.3 两个维度可任意组合
+
+| state 内容 | state 编码 | 说明 |
+|---|---|---|
+| 当前 proprioception | 离散文本 token | PI0.5 标准组合 |
+| 当前 proprioception | 连续投影 | PI0 / 当前 pi05_pico |
+| `action[t-1]` | 离散文本 token | 变体 A |
+| `action[t-1]` | 连续投影 | 变体 B |
+
+要把 state 改成 `action[t-1]`，**正确做法是改数据侧**，不是动 `discrete_state_input`：
+
+- 在数据 transform 链路加一步 `RepackTransform` 或自定义 transform，在 LeRobot dataset 层面或 `LeRobotPicoEgoDataConfig` 的 `repack_transforms` 里替换 `state` 字段。
+- 首帧没有 `t-1`，用零向量或第 0 帧 action 自身填充。
+- **`norm_stats` 必须同步替换**：原来 state 和 action 各有 mean/std；改成 action 分布后必须用 action 的 norm stats 给替换后的 state 归一化，否则模型看到的输入分布偏移。
+
+一句话：`discrete_state_input` 改的是"state 张量怎么进模型"，"上一帧 action 当 state"改的是"state 张量里放什么数"，两者正交不互相替代。
+
+### 6. PI0-FAST：动作离散化 Tokenizer
+
+PI0 用 flow matching 输出连续动作；PI0-FAST 走另一条路——把动作变成离散 token，让自回归 VLM 直接预测。
+
+#### 6.1 为什么不能直接对动作做 BPE
+
+机器人动作在时域上**高度相关**（手臂位置变化平滑），直接 BPE 会得到极长的低熵 token 序列，浪费上下文。
+
+#### 6.2 FAST 的两步压缩
+
+1. **DCT 频域转换**：对一段动作做**离散余弦变换（Discrete Cosine Transform）**，把时序信号从时域转到频域。机器人动作的高频分量很小，可以直接丢掉只保留低频系数。
+2. **BPE 字节对编码**：对剩下的低频系数做 BPE，得到有限的"动作词表"——类似 LLM 词表，每个 token 代表一段动作的某种"模式"。
+
+#### 6.3 在 PI0.5 / PI0.7 中的作用
+
+PI0.5 同时训练两种动作预测路径，联合 loss：
+
+`L = H(FAST_tokens) + α · ||v_θ - u_τ||²`
+
+- 预训练阶段 `α=0`，只用 FAST 离散监督，训练效率高、适合大规模异构数据。
+- 后训练阶段 `α=10`，启用 action expert + flow matching，精度高、推理快。
+
+PI0.7 把这种"FAST 监督 VLM + flow matching 监督 action expert"做成永久的双轨结构（即 KI），并且 VLM 梯度不被 action expert 污染。
+
+### 7. 训练工程细节
+
+#### 7.1 梯度裁剪 + AdamW
+
+- `clip_grad_norm_`：全局 L2 范数超过 `max_norm=1.0` 时等比例缩小。
+- AdamW：`β1=0.9, β2=0.95, ε=1e-8, wd=1e-10`。
+
+精度影响：bf16 参数下 m/v 只有 2-3 位有效数字，`lr=2.5e-5` 时微小更新会被吞掉（`1.0 + 2.5e-7 = 1.0`）；fp32 下更新正确保留（`1.0 + 2.5e-7 = 1.00000025`）。所以**优化器状态必须 fp32**，参数可以 bf16 + master copy fp32。
+
+#### 7.2 学习率调度
+
+前 1000 步线性 warmup 到 `peak_lr=2.5e-5`，之后 cosine decay 到 `end_lr=2.5e-6`。
+
+#### 7.3 JAX 显存：XLA 环境变量
+
+```bash
+# export XLA_PYTHON_CLIENT_ALLOCATOR=platform   # 不要再设这个
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+```
+
+`platform` 模式是"用多少分配多少"会有波动，跟 `MEM_FRACTION=0.9` 的预分配冲突，导致 0.9 不生效。统一只设 `MEM_FRACTION=0.9` 预先分配，行为更稳定。
+
+### 8. 完整数据流图
 
 ```
 数据加载 (fp32)
   → 采样 noise + time (fp32)
-  → 构造 x_t 和目标 u_t (fp32)
+  → 构造 x_τ 和目标 u_τ (fp32)
   → SigLIP 编码图像 (fp32→bf16)
   → Gemma 词嵌入 (bf16)
   → state/action/time 编码 (fp32)
   → 统一 cast bf16 进 Transformer
-  → 双专家 Transformer (bf16, 关键算子 fp32)
-  → 输出 cast fp32 → action_out_proj → v_t
+  → 双专家 Transformer (bf16, Softmax/RoPE/RMSNorm 用 fp32)
+  → 输出 cast fp32 → action_out_proj → v_t [B, 50, 32]
   → MSE loss (fp32) → backward → clip_grad → AdamW.step
   → 定期保存 checkpoint
 ```
-#TODO
-### pico ego pipeline 
-对PICO第一人称视角数据进行处理，包括切分标注、质量检测、转换、生成lerobot
 
-#TODO
-### pi05 多节点多卡训练--修正浮点数精度问题导致的loss曲线偏差
+### 9. PI0.5 相对 PI0 的改进
 
-#TODO
-### pi05：`state=上一帧 action` 与 `discrete_state_input` 的区别
-
-这两个概念完全正交，分别作用在不同层面，不能互相替代。
-
-#### 1. `discrete_state_input` 控制的是 state 的编码方式
-
-`discrete_state_input` 决定的是 state 怎么喂给模型，和 state 字段里面具体放什么内容无关。
-
-- `discrete_state_input=True`（pi05 默认）：state 走文本 token 路径。tokenizer 会把 state 离散化成整数序列，然后拼到 prompt 文本中，例如 `Task: xxx, State: 12 87 200 ...; Action:`。
-- `discrete_state_input=False`（pi0 默认，也是当前 `pi05_pico` 显式设置）：state 走连续向量路径。state 经过 `state_proj` 线性投影，变成一个连续 token，拼到 action expert 的 suffix 里。
-
-需要注意的是，`pi05_pico` 当前配置是 `pi05=True` 且 `discrete_state_input=False`，这是一个非默认组合：模型仍是 pi05，但 state 使用连续投影路径。具体默认逻辑在 `pi0_config.py` 里：如果 `discrete_state_input is None`，才会被设置成 `pi05`。
-
-#### 2. `state=上一帧 action` 改的是数据语义
-
-把 `state[t]` 的内容从"当前本体感知"改成 `action[t-1]`，改变的是 state 字段里装的是什么数值，不改变模型怎么编码 state。
-
-也就是说：
-
-| 维度 | 选项 A | 选项 B |
+| 维度 | PI0 | PI0.5 |
 |---|---|---|
-| state 内容（数据侧） | 当前 proprioception | `action[t-1]` |
-| state 编码（模型侧） | `discrete_state_input=True`：离散文本 token | `discrete_state_input=False`：连续向量投影 |
+| 训练数据 | 10K 小时同质遥操作 + OXE | 异构联合训练：MM + ME + CE + HL（高层标注）+ WD（网络数据）+ VI（口头指令），97.6% 数据不来自目标平台 |
+| 训练阶段 | 单阶段：预训练 → 后训练 | 两阶段：FAST 离散 token 自回归预训练 → 加入 action expert + flow matching 后训练 |
+| 推理范式 | 一次给出 action chunk | 层次化：同一模型先输出子任务文本（"拿起盘子"），再基于子任务输出动作 |
+| State 默认编码 | 连续投影（`discrete_state_input=False`） | 离散文本 token（`discrete_state_input=True`） |
+| 泛化能力 | 任务级泛化（同环境） | 开放世界泛化：在**全新真实家庭**完成 10-15 分钟清洁任务 |
 
-因此可以任意组合：
+核心 take-away：PI0.5 把 VLA 重新定义成一个**同时能输出文本（子任务、FAST 动作 token）和连续动作（flow matching）的统一模型**，靠异构数据联合训练 + 层次化推理实现开放世界泛化。
 
-- pi05 标准：当前 proprioception + 离散文本 state。
-- 当前 `pi05_pico`：当前 proprioception + 连续向量 state。
-- 想尝试的方案：`action[t-1]` + 连续向量 state。
-- 也可以是：`action[t-1]` + 离散文本 state。
+### 10. PI0.7 相对前作的不同
 
-#### 3. 实操建议
+关键词是 **Steerable**——同一个通用模型可以通过 prompt 精确控制"怎么做"。
 
-如果目标是"用上一步 action 当 state"，应该改数据侧，而不是改 `discrete_state_input`：
+#### 10.1 架构变化
 
-- 推荐在数据 transform 链路里增加一步 `RepackTransform` 或自定义 transform，把 `state` 字段替换成 `action[t-1]`。在 LeRobot dataset 层面或者 `LeRobotPicoEgoDataConfig` 的 `repack_transforms` 里都可以做。
-- 注意首帧没有 `t-1` 时，需要用零向量或者第 0 帧 action 自身填充。
-- 维度上，当前数据里的 state 和 action 维度一致，所以可以直接替换。不过要确认 `norm_stats`：原本 state 和 action 各自有 mean/std，如果实际 state 分布改成 action 分布，应该用 action 的 norm stats 给替换后的 state 归一化，否则模型看到的输入分布会偏。
+- VLM 骨干升级到 Gemma-3 4B + 400M 视觉编码器。
+- 新增 **MEM 视频历史编码器**：最多 4 个摄像头 × 6 帧历史时空压缩成固定数量 token。
+- Action expert 扩到 860M（PI0/PI0.5 是 300M）。
+- 总参数约 5B。
 
-简单总结：`discrete_state_input` 改的是"state 这个张量怎么进模型"，而"上一帧 action 当 state"改的是"state 这个张量里放什么数"。两者不冲突，也不互相替代。
+#### 10.2 核心创新：多模态 Prompt
 
-#TODO
-### pi05；训练参数
-#export XLA_PYTHON_CLIENT_ALLOCATOR=platform
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
-原因是我同时设置了这两个环境变量，platform相当于用多少分配多少会有波动，导致 0.9不生效，现在统一改成预先分配0.9来训，看看最后效果能否一致
+除语言指令外，prompt 还可包含：
 
-#### `compute_norm_stats` v2 相对 v1 的优化总结
+- **子任务指令** `ℓ̂_t`：当前要做的语义子任务文本。
+- **子目标图像** `g_t`：BAGEL 14B 世界模型生成的近未来期望状态图像，专门解决"语言描述不清楚视觉细节"的问题。
+- **Episode metadata**：速度（离散化步数）、质量（1-5 分）、错误标签、控制模式。**这是 steerable 的核心抓手**——训练时给真实标签，推理时设为"最高质量/最快速度/无错误"来引导模型输出最优行为。
 
-把 `compute_norm_stats.py` 和 `compute_norm_stats_v2.py` 逐段对比，v2 主要做了 **1 个核心性能优化 + 3 个小改进 + 1 个功能裁剪**。
+训练时各组件随机 dropout（subgoal 75%、metadata 15%、子任务 30%），让模型推理时可以灵活使用任意子集。
 
-##### 核心优化：跳过视频解码（最大头）
+#### 10.3 知识隔离（KI）
 
-- **v1 的瓶颈**：`LeRobotDataset` 在每个 `__getitem__` 里都会调 `_query_videos` 解码 mp4 拿出对应帧的图像，但 `compute_norm_stats` 只统计 `state` 和 `actions` 的均值/方差/分位数——图像数据完全用不上，纯属浪费。
-- **v2 的做法**：定义一个 `NoVideoLeRobotDataset` 子类，覆盖 `_query_videos` 直接返回全零 tensor：
+VLM 只由 FAST token 的离散交叉熵监督，action expert 可以 attention 访问 VLM 的全部激活，但**梯度不回传到 VLM**。VLM 训练更稳定，避免连续 flow loss 干扰视觉语言表征。
 
-```python
-class NoVideoLeRobotDataset(lerobot_dataset.LeRobotDataset):
-    """LeRobotDataset subclass that skips video decoding entirely.
+#### 10.4 涌现能力
 
-    Overrides _query_videos to return zero-filled tensors of the correct shape,
-    so all downstream transforms see the same dict structure as the original.
-    """
+- **跨构型零样本迁移**：BiPi → UR5e 折 T 恤，80% 成功率，匹配顶级人类遥操作员。
+- **组合泛化**：通过语言 coaching 完成训练中从未见过的任务（空气炸锅、压面壶等）。
+- **混合质量数据的 scaling**：去掉 metadata 时加更多数据反而性能下降；有 metadata 时持续提升——证明 metadata 条件化解锁了数据规模的 scaling 效应。
 
-    def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
-        item = {}
-        for vid_key, query_ts in query_timestamps.items():
-            shape = tuple(self.meta.features[vid_key]["shape"])  # e.g. (3, 480, 640)
-            if len(query_ts) == 1:
-                item[vid_key] = torch.zeros(shape, dtype=torch.float32)
-            else:
-                item[vid_key] = torch.zeros((len(query_ts), *shape), dtype=torch.float32)
-        return item
-```
+#### 10.5 PI0 → PI0.5 → PI0.7 内在逻辑
 
-关键设计：
-- **保留 dict 结构**：所有下游 transform（`RepackTransform` 等）仍能拿到 `"observation.images.cam_high"` 这个 key，pipeline 不会因为 key 缺失而崩。
-- **保留 shape**：用 `self.meta.features[vid_key]["shape"]` 拿到正确形状的零张量，跟真解码出来的 tensor 维度一致。
-- **transform 完全一致**：`RepackTransform` / `AlohaInputs` / `DeltaActions` 这些 data transform 一行没改，`norm_stats` 结果跟 v1 是同分布。
+| 维度 | PI0 | PI0.5 | PI0.7 |
+|---|---|---|---|
+| 解决的核心问题 | 灵巧操作的高频动作生成 | 开放世界场景泛化 | 多策略 steerable 控制 |
+| 数据策略 | 高质量同质遥操作 | 异构多源（含网络数据） | 混合质量 + metadata 条件化 |
+| Prompt | 语言指令 | 语言 + 自动生成子任务 | 语言 + 子任务 + subgoal 图 + metadata |
+| 关键设计 | Flow matching + 双专家 | FAST 预训练 + 层次化推理 | Episode metadata + 知识隔离 |
 
-对应 v1 这一行就直接走 `_data_loader.create_torch_dataset`，里面会真解码 mp4：
+### pico ego pipeline
 
-```python
-dataset = _data_loader.create_torch_dataset(data_config, action_horizon, model_config)
-```
+把 PICO 头显采集的第一人称视角原始数据（视频 + tracking + 片段标注）转换成 **LeRobot v2.1** 数据集，用于 VLA 模型（pi0.5）预训练。
 
-预估提速：`pico_ego_V7` 是 av1 编码、1536×2048 的视频，mp4 解码非常吃 CPU。在 8-worker 配置下，v1 几乎是 CPU-bound（解码），而 v2 只读 parquet（每行 20D state + 20D action × action_horizon 帧）。**实测大概率快 5–10×**，全量遍历 1500w 帧从 6–10 小时压到 1 小时以内。
+#### 输入与输出
 
-##### 小改进 1：显式 `download_videos=False`
+**输入**：每个采集会话目录包含
+- `CameraRecord_*.mp4`：原始头显视频
+- `trackingData_*.txt`：JSON Lines 格式的手部追踪
+- `camera_params*.json`：相机内参 + 畸变参数
+- `*_segments_description.json`：人工标注的片段（skill、interacting_hand、target_object 等）
+- `quality_inspection.json`：质检报告（可选）
 
-```python
-download_videos=False,
-```
+**输出**：标准 LeRobot 数据集（`data/` / `videos/` / `meta/`），`observation.state` 与 `action` 均为 **20D**（每只手 `xyz(3) + 6D rotation(6) + gripper(1) = 10D`，6D 旋转用 Zhou et al. 2019 的"旋转矩阵前两列展平"）。
 
-防止 `LeRobotDataset` 启动时尝试从 HF Hub 拉视频文件——你的数据在本地，本来也不需要下载，加个 flag 让行为更显式、跑得更稳。
+#### 流水线步骤
 
-##### 小改进 2：增加 `--output-name` 选项
+入口 `run_pipeline.py` 递归扫描顶层目录下所有会话，按以下步骤逐个处理：
 
-v1：
-
-```python
-output_path = config.assets_dirs / data_config.repo_id
-```
-
-输出路径**写死**为 `assets_dirs / repo_id`。
-
-v2：
-
-```python
-if output_name is not None:
-    output_path = config.assets_dirs / output_name
-else:
-    output_path = config.assets_dirs / data_config.repo_id
-print(f"Writing stats to: {output_path}")
-normalize.save(output_path, norm_stats)
-print("Done!")
-```
-
-可以传 `--output-name pico_ego_V7_test` 把结果写到别处做对比，不会覆盖已有的。
-
-##### 小改进 3：日志清理
-
-- v1 用了中文 `print("覆盖 repo_id: ...")`、`print("✅ 已重置 norm_stats（将重新计算）")`，包含 emoji。
-- v2 全部改成英文 `Override repo_id: ...`，去掉 emoji、加上 `Writing stats to:` 和 `Done!` 的明确收尾。
-
-##### 功能裁剪：去掉 RLDS 路径
-
-v1 有两条分支：torch dataset 或 RLDS dataset（DROID 等）：
-
-```python
-if data_config.rlds_data_dir is not None:
-    data_loader, num_batches = create_rlds_dataloader(
-        data_config, config.model.action_horizon, config.batch_size, max_frames
-    )
-else:
-    data_loader, num_batches = create_torch_dataloader(
-        data_config, config.model.action_horizon, config.batch_size, config.model, config.num_workers, max_frames
-    )
-```
-
-v2 直接拒绝 RLDS：
-
-```python
-if data_config.rlds_data_dir is not None:
-    raise ValueError(
-        "RLDS datasets are not supported by this script. "
-        "Use the original compute_norm_stats.py instead."
-    )
-```
-
-合理：因为 v2 的视频跳过技巧依赖 `LeRobotDataset._query_videos` 这个钩子，RLDS 走的是完全不同的 pipeline。需要 RLDS 时再回去用 v1。
-
-##### 一图总结
-
-| 维度 | v1 | v2 |
+| 步 | 内容 | 脚本 |
 |---|---|---|
-| **核心瓶颈：视频解码** | 真解码（CPU bound） | 零张量替代（仅读 parquet） |
-| 速度 | 慢（小时级） | 快（10 分钟级） |
-| `download_videos` | 默认（可能尝试下载） | `False` 显式禁 |
-| 输出路径自定义 | 不支持 | `--output-name` |
-| RLDS 数据集 | 支持 | 不支持（明确报错） |
-| 日志 | 中文 + emoji | 英文 |
-| 数据 transform pipeline | 一致 | **完全一致**（norm_stats 结果同分布） |
-| 适用数据集 | LeRobot + RLDS | 仅 LeRobot |
+| **Q** | 质量过滤（硬过滤 + 软评分 0~5）；硬过滤未通过直接跳过 | `quality_filter.py` |
+| **0** | 修正 tracking 时间戳（补偿管线延迟 140ms） | `00_correct_tracking_time.py` |
+| **1** | 并行：① tracking TXT → HDF5（只保留左右手）；② 视频去畸变 | `01_trackingdata_to_hdf5.py` / `01_video_undistort.py` |
+| **2** | 按标注切分 episodes：视频段 + 动作 H5，可选帧率转换（如 25→30fps，`setpts=N/fps/TB -bf 0`） | `02_video_hdf5_segment.py` |
+| **3** | H5 → Parquet：构造 20D state/action（xyz+6D rot+gripper），同时生成 `tasks.jsonl` | `03_hdf5_to_parquet.py` |
+| **4** | 并行：① 整理 LeRobot `data/`；② 整理 LeRobot `videos/`（仅复制重组，不重编码） | `04_lerobot_data_generate.py` / `04_lerobot_video_generate.py` |
+| **5** | 生成 LeRobot `meta/`（info.json、stats、episodes.jsonl、tasks.jsonl 等） | `04_lerobot_meta_generate.py` |
+| **6**（可选） | `--auto-merge` 合并所有单会话数据集到 `_merged/`，**视频用 symlink** 节省空间 | `05_merge_lerobot_datasets.py` |
 
-正确性保证：因为 `RepackTransform` / `DeltaActions` / `Normalize` 等数据流的输入只用到 `state` 和 `actions`（图像只是 transform pipeline 里的旁路），把图像换成零张量**不影响 `norm_stats` 的数值结果**，只是把无意义的 I/O 砍掉。所以 v2 是**纯加速优化**，没有任何精度损失。
+#### 质量过滤的两层设计
 
-适合 V7 这种 1500w 帧的大数据集——v1 跑全量怕是要一整夜，v2 应该 1 小时内能搞定。
+1. **硬过滤**：任一命中直接淘汰
+   - 相机标定无效（去畸变会崩）
+   - 视频 < 5s（切分后没意义）
+   - 视频-tracking 时长比偏离 `[0.9, 1.1]`（同步出问题）
+   - 双手 missing ratio 都 > 90%
+   - 语义噪声里有 invalid 段
+   - 关节 ROM 违规 > 100 帧
 
-#TODO
-### FAST tokenizer 原理
-FAST 先对动作做离散余弦变换（DCT）——把时序信号从时域转到频域，因为机器人动作的高频分量很小，可以直接丢掉；然后对剩下的低频系数做字节对编码（BPE），得到一个有限的 "动作词表"（类似 LLM 的词表，只是这个词表里的每个 token 代表一段动作的某种"模式"）。
+2. **软评分**：从视觉 / 动作 / 时序 / 内容四个维度打 0~100 分 → 映射到 0~5 的 quality 数值，写入 `task_prompt` 前缀：
 
-#TODO
+   `quality: 5; skill: Hover; hand: both; target_object: shelf; type: human; <原始描述>`
+
+   下游训练时可按 quality 筛选/加权（pi0.7 那种 multimodal prompting 的思路）。
+
+#### 关键设计点
+
+- **20D action 维度** 是为了对齐 VLA 输入；6D rotation 而非欧拉/四元数，避免不连续性。
+- **视频帧率统一在 Step 2 完成**，Step 4 不再重编码，避免重复 transcoding 损失质量。
+- **中间产物（`_middle/` 与 `_segments/`）默认结束清理**，`--debug` 保留方便排查。
+- **OSS FUSE 写视频问题**：所有 ffmpeg / cv2.VideoWriter 输出必须先写本地 FS 再 `cp`，已封装在 `staged_writer`（见上节）。
+- **并行**：单会话内 Step 1 / Step 4 并行；多会话之间用 `--workers` 控制 ThreadPoolExecutor。
+
 ### OSS FUSE 写 MP4 时 moov atom 丢失的根本原因
 
-**问题现象**：用 ffmpeg / cv2.VideoWriter 直接把 mp4 写入挂载的 OSS FUSE 路径（`/mnt/pico_data`）时，文件能写出但播放器打不开、ffprobe 报错、moov atom 缺失。典型报错：
-- `ffmpeg returncode=234: Error writing trailer: Invalid argument`
-- cv2.VideoWriter close 后输出文件无 moov（"cannot open"）
+**问题现象**：用 ffmpeg / cv2.VideoWriter 直接把 mp4 写到 OSS FUSE 路径（`/mnt/pico_data`）时，文件能写出但播放器打不开、ffprobe 报 moov 缺失，典型报错 `Error writing trailer: Invalid argument`。
 
-#### 1. MP4 容器结构
+#### 1. MP4 写入需要 seek
 
-MP4 由若干 box / atom 组成，关键的两个：
+MP4 文件主要由两个 atom 组成：
+- `mdat`：实际编码数据，编码过程中顺序追加；
+- `moov`：每帧偏移、时长、编解码参数等索引，**必须等所有帧编完才能算出**。
 
-| atom | 内容 | 大小 | 写入时机 |
-|---|---|---|---|
-| `mdat` | 实际编码后的视音频数据 | 占整文件 >99% | 编码过程中顺序追加 |
-| `moov` | 元数据索引：每帧的偏移、时长、编解码参数等 | 几 KB ~ 几 MB | 全部帧编码完成后才能计算出（因为依赖每个 sample 的偏移） |
+主流 muxer（ffmpeg / OpenCV）的标准写入流程：先占位写 `mdat`，编码结束后构造 `moov` 写到文件尾，再 **`seek` 回头**把 `moov` 搬到文件首部（faststart 重排，方便边下边播）。
 
-标准写入流程（ffmpeg / OpenCV / 几乎所有 muxer 默认）：
-1. 打开输出文件，预留 `mdat` 头部
-2. 顺序 append 每一帧到 `mdat`
-3. 关闭时构建 `moov`，写到文件末尾
-4. **`seek(0)`，把 `moov` 移到文件开头（"faststart"重排）**，或用占位符提前预留位置回头 seek 进去写
+> **关键**：close 阶段那一步 seek 是回头写已经存在的偏移，不是顺序追加。
 
-> 关键：第 4 步必须 seek 到已写入的偏移位置覆盖重写。
+#### 2. OSS FUSE 不支持 seek + write
 
-#### 2. OSS FUSE 的硬约束
+OSS 对象存储本身**不可变**（PutObject 是原子全量写），ossfs2 用 multipart upload 来模拟"追加"，因此：
 
-`/mnt/pico_data` 是阿里云 ossfs2 把 OSS 对象存储挂载成 POSIX 文件系统的产物。**OSS 对象本身是不可变的**（PutObject 是原子全量写），ossfs2 用 multipart upload 在写入时模拟"追加"：
+- ✅ 顺序 append → multipart upload，OK
+- ✅ 顺序 read → GetObject Range，OK
+- ❌ **seek + write 已写过的偏移** → OSS 不支持对象局部更新，ossfs2 也没有完整本地缓存来撑随机写
 
-- ✅ 顺序写（一直 append，永不回头） → 走 multipart upload，OK
-- ✅ read（走 GetObject Range），OK
-- ❌ **seek + write**（已写过的偏移再回头改） → OSS 不支持"对象局部更新"，ossfs2 也没有完整的本地缓存来支持随机写
+所以一旦 muxer 在 close 时做 faststart 重排，那一刻就必然失败。
 
-所以 OSS FUSE 上 cv2 / ffmpeg 写 mp4 时，到了第 4 步 `seek + write moov` 那一刻就会失败。表现：文件确实存在，但 ffprobe 打不开 / 大小异常 / 没有帧索引。
+理论上 fragmented MP4（`-movflags +empty_moov+default_base_moof`）把 `moov` 拆成多个 `moof` 片段与 `mdat` 交错顺序写，可以绕过 seek，但 cv2.VideoWriter 没把这个选项透出来，所以默认行为下必崩。
 
-#### 3. 为什么"打开就能播"的 mp4 还能写成功？
+#### 3. 解决方案：staged writer
 
-存在两种"避开 seek"的写法，但需要 muxer 显式支持：
-
-| 写法 | 原理 | 谁支持 |
-|---|---|---|
-| `-movflags +faststart`（默认） | 末尾写完 moov 后 seek 到头部插入，**仍然需要 seek** | 失败 |
-| `-movflags +empty_moov+default_base_moof`（fragmented mp4 / fMP4） | 把 moov 拆成多个 moof 片段，与 mdat 交错顺序写，**无 seek** | ffmpeg 支持，但 cv2.VideoWriter 不暴露此选项 |
-| 先全部写到内存/磁盘，最后整体上传 | muxer 在本地完成，再把成品当一次性数据流写 OSS | 我们采用的 staged 方案 |
-
-cv2.VideoWriter 调的是底层 ffmpeg muxer，**没有把 fragmented 选项透出来**，因此走默认路径 → 必然 seek → 必然失败。
-
-#### 4. 项目里踩过的具体场景
-
-| 场景 | 直接写 OSS FUSE | 现象 |
-|---|---|---|
-| `face_blur` 用 ffmpeg 写 `_blurred.mp4` | ❌ | `Error writing trailer: Invalid argument` (returncode=234) |
-| `VideoSplitRefiner` 用 ffmpeg crop split | ❌ | 同上 |
-| `visualize_joints_and_annotations.py` 用 cv2.VideoWriter | ❌ | `Temp output validation failed`（cannot open） |
-| 顺序 `cp` 一个已经写好的完整 mp4 到 OSS | ✅ | 正常（ossfs2 走 multipart upload） |
-| `cv2.VideoCapture` 顺序读 mp4 | ✅ | 正常 |
-
-#### 5. 项目采用的解决方案：staged writer
-
-统一模式：
+既然 muxer 必须 seek，那就**让 seek 发生在本地 FS 上**，写完整再一次性顺序传到 OSS：
 
 ```
-[ encoder ] → 本地高速 FS（tmpfs /dev/shm 或 CPFS）→ 完整 mp4
-                            ↓ sequential cp
-                    OSS FUSE refined/
+encoder → 本地高速 FS（tmpfs / CPFS）→ 完整 mp4
+                ↓ sequential cp
+            OSS FUSE refined/
 ```
 
-实现位置：
-- `python/staged_writer.staged_oss_output`：context manager，封装 tmp 写 + sequential copy
-- `python/refiners/video_split_refiner.py`、`face_blur` 等 refiner：通过 `staged_oss_output` 包装 ffmpeg 输出
-- 本次 visualize 任务：用 shell 把 `--output_dir` 指到本地 CPFS，结束后 `cp` 到 `/mnt/pico_data/<rel>/refined/`
+`cp` 对 OSS FUSE 来说就是把整个文件作为一次 multipart upload 写出，全程顺序无 seek，因此能成功。
 
-`cp` 之所以可行：它是**顺序 read + write**，对 OSS FUSE 来说就是把整个文件作为一次 multipart upload 写出，全程无 seek。
+项目里统一封装在 `python/staged_writer.staged_oss_output`（context manager），face_blur / VideoSplitRefiner 等所有写 mp4 的 refiner 都套这个 wrapper。
 
-#### 6. 一句话总结
+#### 4. 一句话总结
 
-> MP4 容器要求把元数据（moov atom）写到文件首部（或末尾后再 seek 回头），而 OSS FUSE 底层是不可变对象存储，**只能顺序写，不支持回头改**。所以任何"直接把 ffmpeg / cv2.VideoWriter 输出目标设在 `/mnt/pico_data` 下"的写法都会在 close 阶段失败 —— 解决办法是先把完整 mp4 写到本地 FS，再用 `cp` 一次性顺序上传。
+> MP4 要求 close 时 seek 回头写 `moov`，而 OSS FUSE 底层是不可变对象存储只能顺序写——所以必须先在本地写完整文件，再顺序 `cp` 上 OSS。
