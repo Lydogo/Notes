@@ -1029,6 +1029,128 @@ v_t 应逼近 u_t = noise - actions，即模型学会在任意噪声水平下如
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 原因是我同时设置了这两个环境变量，platform相当于用多少分配多少会有波动，导致 0.9不生效，现在统一改成预先分配0.9来训，看看最后效果能否一致
 
+#### `compute_norm_stats` v2 相对 v1 的优化总结
+
+把 `compute_norm_stats.py` 和 `compute_norm_stats_v2.py` 逐段对比，v2 主要做了 **1 个核心性能优化 + 3 个小改进 + 1 个功能裁剪**。
+
+##### 核心优化：跳过视频解码（最大头）
+
+- **v1 的瓶颈**：`LeRobotDataset` 在每个 `__getitem__` 里都会调 `_query_videos` 解码 mp4 拿出对应帧的图像，但 `compute_norm_stats` 只统计 `state` 和 `actions` 的均值/方差/分位数——图像数据完全用不上，纯属浪费。
+- **v2 的做法**：定义一个 `NoVideoLeRobotDataset` 子类，覆盖 `_query_videos` 直接返回全零 tensor：
+
+```python
+class NoVideoLeRobotDataset(lerobot_dataset.LeRobotDataset):
+    """LeRobotDataset subclass that skips video decoding entirely.
+
+    Overrides _query_videos to return zero-filled tensors of the correct shape,
+    so all downstream transforms see the same dict structure as the original.
+    """
+
+    def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
+        item = {}
+        for vid_key, query_ts in query_timestamps.items():
+            shape = tuple(self.meta.features[vid_key]["shape"])  # e.g. (3, 480, 640)
+            if len(query_ts) == 1:
+                item[vid_key] = torch.zeros(shape, dtype=torch.float32)
+            else:
+                item[vid_key] = torch.zeros((len(query_ts), *shape), dtype=torch.float32)
+        return item
+```
+
+关键设计：
+- **保留 dict 结构**：所有下游 transform（`RepackTransform` 等）仍能拿到 `"observation.images.cam_high"` 这个 key，pipeline 不会因为 key 缺失而崩。
+- **保留 shape**：用 `self.meta.features[vid_key]["shape"]` 拿到正确形状的零张量，跟真解码出来的 tensor 维度一致。
+- **transform 完全一致**：`RepackTransform` / `AlohaInputs` / `DeltaActions` 这些 data transform 一行没改，`norm_stats` 结果跟 v1 是同分布。
+
+对应 v1 这一行就直接走 `_data_loader.create_torch_dataset`，里面会真解码 mp4：
+
+```python
+dataset = _data_loader.create_torch_dataset(data_config, action_horizon, model_config)
+```
+
+预估提速：`pico_ego_V7` 是 av1 编码、1536×2048 的视频，mp4 解码非常吃 CPU。在 8-worker 配置下，v1 几乎是 CPU-bound（解码），而 v2 只读 parquet（每行 20D state + 20D action × action_horizon 帧）。**实测大概率快 5–10×**，全量遍历 1500w 帧从 6–10 小时压到 1 小时以内。
+
+##### 小改进 1：显式 `download_videos=False`
+
+```python
+download_videos=False,
+```
+
+防止 `LeRobotDataset` 启动时尝试从 HF Hub 拉视频文件——你的数据在本地，本来也不需要下载，加个 flag 让行为更显式、跑得更稳。
+
+##### 小改进 2：增加 `--output-name` 选项
+
+v1：
+
+```python
+output_path = config.assets_dirs / data_config.repo_id
+```
+
+输出路径**写死**为 `assets_dirs / repo_id`。
+
+v2：
+
+```python
+if output_name is not None:
+    output_path = config.assets_dirs / output_name
+else:
+    output_path = config.assets_dirs / data_config.repo_id
+print(f"Writing stats to: {output_path}")
+normalize.save(output_path, norm_stats)
+print("Done!")
+```
+
+可以传 `--output-name pico_ego_V7_test` 把结果写到别处做对比，不会覆盖已有的。
+
+##### 小改进 3：日志清理
+
+- v1 用了中文 `print("覆盖 repo_id: ...")`、`print("✅ 已重置 norm_stats（将重新计算）")`，包含 emoji。
+- v2 全部改成英文 `Override repo_id: ...`，去掉 emoji、加上 `Writing stats to:` 和 `Done!` 的明确收尾。
+
+##### 功能裁剪：去掉 RLDS 路径
+
+v1 有两条分支：torch dataset 或 RLDS dataset（DROID 等）：
+
+```python
+if data_config.rlds_data_dir is not None:
+    data_loader, num_batches = create_rlds_dataloader(
+        data_config, config.model.action_horizon, config.batch_size, max_frames
+    )
+else:
+    data_loader, num_batches = create_torch_dataloader(
+        data_config, config.model.action_horizon, config.batch_size, config.model, config.num_workers, max_frames
+    )
+```
+
+v2 直接拒绝 RLDS：
+
+```python
+if data_config.rlds_data_dir is not None:
+    raise ValueError(
+        "RLDS datasets are not supported by this script. "
+        "Use the original compute_norm_stats.py instead."
+    )
+```
+
+合理：因为 v2 的视频跳过技巧依赖 `LeRobotDataset._query_videos` 这个钩子，RLDS 走的是完全不同的 pipeline。需要 RLDS 时再回去用 v1。
+
+##### 一图总结
+
+| 维度 | v1 | v2 |
+|---|---|---|
+| **核心瓶颈：视频解码** | 真解码（CPU bound） | 零张量替代（仅读 parquet） |
+| 速度 | 慢（小时级） | 快（10 分钟级） |
+| `download_videos` | 默认（可能尝试下载） | `False` 显式禁 |
+| 输出路径自定义 | 不支持 | `--output-name` |
+| RLDS 数据集 | 支持 | 不支持（明确报错） |
+| 日志 | 中文 + emoji | 英文 |
+| 数据 transform pipeline | 一致 | **完全一致**（norm_stats 结果同分布） |
+| 适用数据集 | LeRobot + RLDS | 仅 LeRobot |
+
+正确性保证：因为 `RepackTransform` / `DeltaActions` / `Normalize` 等数据流的输入只用到 `state` 和 `actions`（图像只是 transform pipeline 里的旁路），把图像换成零张量**不影响 `norm_stats` 的数值结果**，只是把无意义的 I/O 砍掉。所以 v2 是**纯加速优化**，没有任何精度损失。
+
+适合 V7 这种 1500w 帧的大数据集——v1 跑全量怕是要一整夜，v2 应该 1 小时内能搞定。
+
 #TODO
 ### FAST tokenizer 原理
 FAST 先对动作做离散余弦变换（DCT）——把时序信号从时域转到频域，因为机器人动作的高频分量很小，可以直接丢掉；然后对剩下的低频系数做字节对编码（BPE），得到一个有限的 "动作词表"（类似 LLM 的词表，只是这个词表里的每个 token 代表一段动作的某种"模式"）。
