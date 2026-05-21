@@ -21,33 +21,64 @@
 - 再绕 **新 Y** 轴旋转 β（Pitch）  
 - 最后绕 **新 X** 轴旋转 γ（Roll）
 
-角度向量：  
-\[
+角度向量：
+
+$$
 [\alpha,\ \beta,\ \gamma]
-\]
+$$
 
 ---
 
 ### 2. 单轴基础旋转矩阵
+
 绕当前坐标系 `i` 的各轴旋转角度 `θ` 时，对应的 **3×3 旋转矩阵** 如下：
-| 轴 | 旋转矩阵 |
-|---|---|
-| **Z(α)** | \[R_z(\alpha)=\begin{bmatrix}\cos\alpha & -\sin\alpha & 0 \\ \sin\alpha & \cos\alpha & 0 \\ 0 & 0 & 1\end{bmatrix}\] |
-| **Y(β)** | \[R_y(\beta)=\begin{bmatrix}\cos\beta & 0 & \sin\beta \\ 0 & 1 & 0 \\ -\sin\beta & 0 & \cos\beta\end{bmatrix}\] |
-| **X(γ)** | \[R_x(\gamma)=\begin{bmatrix}1 & 0 & 0 \\ 0 & \cos\gamma & -\sin\gamma \\ 0 & \sin\gamma & \cos\gamma\end{bmatrix}\] |
+
+**绕 Z 轴旋转 α（Yaw）：**
+
+$$
+R_z(\alpha)=
+\begin{bmatrix}
+\cos\alpha & -\sin\alpha & 0 \\
+\sin\alpha &  \cos\alpha & 0 \\
+0          &  0          & 1
+\end{bmatrix}
+$$
+
+**绕 Y 轴旋转 β（Pitch）：**
+
+$$
+R_y(\beta)=
+\begin{bmatrix}
+\cos\beta  & 0 & \sin\beta \\
+0          & 1 & 0         \\
+-\sin\beta & 0 & \cos\beta
+\end{bmatrix}
+$$
+
+**绕 X 轴旋转 γ（Roll）：**
+
+$$
+R_x(\gamma)=
+\begin{bmatrix}
+1 & 0          & 0           \\
+0 & \cos\gamma & -\sin\gamma \\
+0 & \sin\gamma &  \cos\gamma
+\end{bmatrix}
+$$
 
 ---
 
 ### 3. 合成旋转矩阵（Z-Y-X 欧拉角 → 旋转矩阵）
+
 按**当前轴顺序**右乘：
 
-\[
+$$
 R = R_z(\alpha)\cdot R_y(\beta)\cdot R_x(\gamma)
-\]
+$$
 
 展开结果：
 
-\[
+$$
 R =
 \begin{bmatrix}
 \cos\alpha\cos\beta &
@@ -60,7 +91,7 @@ R =
 \cos\beta\sin\gamma &
 \cos\beta\cos\gamma
 \end{bmatrix}
-\]
+$$
 
 ---
 
@@ -104,27 +135,28 @@ R =
 
 在机器人运动学中，**逆运动学（IK）**的目标是：
 
-> 给定末端执行器的目标位姿 \( \mathbf{x}_d \in \mathbb{R}^m \)，求解关节角度 \( \mathbf{q} \in \mathbb{R}^n \)，使得：
-\[
-\mathbf{x}_d = f(\mathbf{q})
-\]
+> 给定末端执行器的目标位姿 $\mathbf{x}_d \in \mathbb{R}^m$，求解关节角度 $\mathbf{q} \in \mathbb{R}^n$，使得：
 
-由于 \( f \) 通常是非线性的，**雅可比矩阵求逆法**通过**线性化**和**迭代**来逼近解。
+$$
+\mathbf{x}_d = f(\mathbf{q})
+$$
+
+由于 $f$ 通常是非线性的，**雅可比矩阵求逆法**通过**线性化**和**迭代**来逼近解。
 
 ---
 
 #### 二、核心思想
 利用**雅可比矩阵**建立**关节速度**与**末端速度**之间的线性关系：
 
-\[
+$$
 \dot{\mathbf{x}} = \mathbf{J}(\mathbf{q}) \dot{\mathbf{q}}
-\]
+$$
 
 其中：
 
-- \( \dot{\mathbf{x}} \in \mathbb{R}^m \)：末端执行器在任务空间的速度（如线速度 + 角速度）, 是个 6×1 向量：前 3 行是末端线速度 v，后 3 行是角速度 ω
-- \( \dot{\mathbf{q}} \in \mathbb{R}^n \)：关节速度,是 n×1 关节速度向量（每个关节转多快）。
-- \( \mathbf{J}(\mathbf{q}) \in \mathbb{R}^{m \times n} \)：雅可比矩阵，依赖于当前关节角度
+- $\dot{\mathbf{x}} \in \mathbb{R}^m$：末端执行器在任务空间的速度（如线速度 + 角速度）, 是个 6×1 向量：前 3 行是末端线速度 v，后 3 行是角速度 ω
+- $\dot{\mathbf{q}} \in \mathbb{R}^n$：关节速度,是 n×1 关节速度向量（每个关节转多快）。
+- $\mathbf{J}(\mathbf{q}) \in \mathbb{R}^{m \times n}$：雅可比矩阵，依赖于当前关节角度
 - 把“关节空间的小速度”映射成“任务空间的小速度”。
 一句话：如果我把每个关节拧快一点点，末端会往哪边跑、跑多快？
 
@@ -132,58 +164,67 @@ R =
 
 #### 三、求解步骤（一阶雅可比迭代法）
 ##### 步骤1：初始化
-- 给定初始关节角度 \( \mathbf{q}_0 \)
-- 设定目标位姿 \( \mathbf{x}_d \)
-- 设定误差容限 \( \epsilon \) 和最大迭代次数 \( N \)
+- 给定初始关节角度 $\mathbf{q}_0$
+- 设定目标位姿 $\mathbf{x}_d$
+- 设定误差容限 $\epsilon$ 和最大迭代次数 $N$
 
 ##### 步骤2：迭代更新
-对于第 \( k \) 次迭代：
+对于第 $k$ 次迭代：
 
 1. 计算当前末端位姿：
-   \[
-   \mathbf{x}_k = f(\mathbf{q}_k)
-   \]
+
+$$
+\mathbf{x}_k = f(\mathbf{q}_k)
+$$
 
 2. 计算误差：
-   \[
-   \Delta \mathbf{x}_k = \mathbf{x}_d - \mathbf{x}_k
-   \]
 
-3. 计算雅可比矩阵 \( \mathbf{J}(\mathbf{q}_k) \)
+$$
+\Delta \mathbf{x}_k = \mathbf{x}_d - \mathbf{x}_k
+$$
+
+3. 计算雅可比矩阵 $\mathbf{J}(\mathbf{q}_k)$
 
 4. 求解关节速度：
-   - 若 \( m = n \)（非冗余）：
-     \[
-     \dot{\mathbf{q}}_k = \mathbf{J}^{-1}(\mathbf{q}_k) \Delta \mathbf{x}_k
-     \]
-   - 若 \( m < n \)（冗余）：
-     \[
-     \dot{\mathbf{q}}_k = \mathbf{J}^+(\mathbf{q}_k) \Delta \mathbf{x}_k
-     \]
-     其中 \( \mathbf{J}^+ \) 是**伪逆矩阵（Moore-Penrose inverse）**：
-     \[
-     \mathbf{J}^+ = \mathbf{J}^T (\mathbf{J} \mathbf{J}^T)^{-1}
-     \]
-     把“末端还差的速度”转换成“关节要补的速度”。就像齿轮比：末端差 1 mm/s，关节需要转多少 rad/s 才能补上。
+   - 若 $m = n$（非冗余）：
 
-5. 更新关节角度（使用小步长 \( \alpha \)）：
-   \[
-   \mathbf{q}_{k+1} = \mathbf{q}_k + \alpha \dot{\mathbf{q}}_k
-   \]
+$$
+\dot{\mathbf{q}}_k = \mathbf{J}^{-1}(\mathbf{q}_k) \Delta \mathbf{x}_k
+$$
+
+   - 若 $m < n$（冗余）：
+
+$$
+\dot{\mathbf{q}}_k = \mathbf{J}^+(\mathbf{q}_k) \Delta \mathbf{x}_k
+$$
+
+     其中 $\mathbf{J}^+$ 是**伪逆矩阵（Moore-Penrose inverse）**：
+
+$$
+\mathbf{J}^+ = \mathbf{J}^T (\mathbf{J} \mathbf{J}^T)^{-1}
+$$
+
+     把"末端还差的速度"转换成"关节要补的速度"。就像齿轮比：末端差 1 mm/s，关节需要转多少 rad/s 才能补上。
+
+5. 更新关节角度（使用小步长 $\alpha$）：
+
+$$
+\mathbf{q}_{k+1} = \mathbf{q}_k + \alpha \dot{\mathbf{q}}_k
+$$
 
 6. 检查收敛：
-   - 若 \( \|\Delta \mathbf{x}_k\| < \epsilon \)，停止
+   - 若 $\|\Delta \mathbf{x}_k\| < \epsilon$，停止
    - 否则继续迭代
 
 ---
 
 #### 四、伪逆法（冗余机械臂）
-当自由度 \( n > \) 任务空间维度 \( m \)，系统**欠定**，有无穷多解。
+当自由度 $n >$ 任务空间维度 $m$，系统**欠定**，有无穷多解。
 此时使用**伪逆法**求解**最小范数解**（即能量最小）：
 
-\[
+$$
 \dot{\mathbf{q}} = \mathbf{J}^+ \dot{\mathbf{x}}
-\]
+$$
 
 ##### 优点：
 - 保证解的**最小速度范数**
@@ -193,14 +234,15 @@ R =
 ---
 
 #### 五、奇异问题与阻尼伪逆
-当 \( \mathbf{J} \) 接近**奇异**（行列式接近0），伪逆法会**数值不稳定**。
+当 $\mathbf{J}$ 接近**奇异**（行列式接近0），伪逆法会**数值不稳定**。
 
 ### 解决方案：**阻尼伪逆（Damped Pseudoinverse）**
-\[
-\mathbf{J}^* = \mathbf{J}^T (\mathbf{J} \mathbf{J}^T + \lambda^2 \mathbf{I})^{-1}
-\]
 
-- \( \lambda \)：阻尼因子（通常 0.01 ~ 0.1）
+$$
+\mathbf{J}^* = \mathbf{J}^T (\mathbf{J} \mathbf{J}^T + \lambda^2 \mathbf{I})^{-1}
+$$
+
+- $\lambda$：阻尼因子（通常 0.01 ~ 0.1）
 - 牺牲少量精度，换取**数值稳定性**
 
 ---
@@ -334,13 +376,6 @@ ROS2与Gazebo的集成主要通过以下方式实现：
 4. ros2_control ：提供硬件抽象层，连接控制器与仿真
 
 
-# 电机控制FOC算法
-六步换相 6个mos管外加不通电可以控制三个线圈产生7个不同方向的磁场力
-再用类似于PWM占空比理论，让两个相邻方向磁场对应的状态来回切换，改变占比，就可以控制电机转向任意方向了
-再加入PID控制，分别对位置、速度、电流进行控制，形成三个负反馈系统
-
-
-
 # 个人项目
 ## 1.ROS2机械臂夹取项目
 ### 用到的库
@@ -434,154 +469,6 @@ IK：末端Pose → 关节角向量，MoveIt2框架内部使用KDL（Kinematics 
 - 问题复盘：状态读取指令无序插入动作指令序列（如GOTO指令执行中多次插入STATE读取），导致部分电机动作延迟，机械臂出现非预期运动轨迹，违背预设逻辑。
 - 原因：原来的控制机制中，动作服务器一直在读取电机状态，与电机动作指令无约束并发执行，导致：1.动作指令未发送完成即被状态读取打断，引发指令不同步；2.存在非必要状态读取，造成资源冗余。
 - 解决措施：取消无约束高频定频读取，增设约束：动作指令发送完成前禁止状态获取；优化控制锁范围，删除无效长时间锁占用，避免锁竞争加剧混乱。
-
-
-# 面试复盘
-## 25.10.10 海恒智能 机械臂算法工程师
-### 1 ros加moveit2 怎么做一些完整的运动规划和控制？
-1）机器人模型与配置
-- URDF:机器人描述文件，定义了机器人的几何结构、关节、连杆、传感器等。
-- SRDF：MoveIt2会自动生成的配置文件，在URDF的基础上增加了语义信息
-2）感知与环境建模
-- 传感器数据:接收来自深度相机（如Kinect）、激光雷达等传感器的点云数据。
-- 环境表示:Costmap，通常会订阅ROS2的话题实现
-3）运动规划 (Motion Planning)
-- 规划请求 (Planning Request) : 用户或上层任务发送的规划请求，包括：
-起始状态 (Start State) : 机器人的当前关节角度。
-目标状态 (Goal State) : 目标末端执行器位姿或目标关节角度。
-路径约束 (Path Constraints) : 运动过程中需要满足的约束，例如保持末端执行器姿态不变。
-障碍物信息 (Obstacle Information) : 来自环境建模的障碍物数据。
-规划器 (Planners) : MoveIt2集成了多种运动规划算法，包括采样式规划器和优化式规划器
-项目中的体现 : panda_pick_n_place.py 中通过Panda类中的 _panda.solve_ik 直接计算关节目标。
-如果使用MoveIt 2，会通过 move_group 接口发送规划请求，由MoveIt 2的规划器选择合适的算法生成轨迹。
-- 逆运动学求解器 (Inverse Kinematics Solvers) : 在规划过程中，规划器需要频繁调用逆运动学求解器来计算末端执行器目标对应的关节角度。
-项目中的体现 : self._panda.solve_ik(self._end_effector_target) 直接调用了Panda类逆运动学求解器。
-MoveIt 2通常会配置一个默认的IK求解器（如KDL或TRAC-IK）
-### 2 opencv中使用了哪一些算法？
-1）边缘检测（比如Canny）找出墙面上的“线条”
-2）轮廓检测（findContours）找出抹头的边缘位置
-3）霍夫直线变换（Hough Lines）拟合出这两条线的角度
-### 3 CAN通信两个节点在主线上无法通信，怎么排查问题？
-1）从软件角度：工作中遇到的实际bug案例，调度代码里面屏蔽了
-2）硬件角度：示波器看差分波形，看看显性隐性电平对不对；监听抓ACK故障位
-### 4 之前项目使用的CAN通信波特率是多少？
-500 kbit/s 注意单位
-### 5 多个模块在ROS中，是怎么管理的？
-1）引入组件（Component）机制，通过rclcpp_components实现运行时动态加载节点为共享库
-2）Docker容器化
-### 6 节点启动是怎么做的？
-launch文件
-### 7 ROS的通讯机制是什么？（分布式）
-分布式、异步、多对多
-### 8 PID的三个字母分别代表什么意思？有什么作用？
-P：比例，消除当前误差；
-I：积分，消除稳态残差；
-D：微分，预测未来误差变化，抑制超调。
-
-### 9 PID控制算法和模糊控制算法相比有什么优势和劣势？
-PID：
-是一种线性反馈控制算法，通过计算设定值与实际输出值之间的误差，对误差进行比例（P）、积分（I）和微分（D）三种运算，加权求和后作为控制量输出，驱动系统向目标靠拢。
-特点：
-结构简单、响应快、稳定性好，但对系统模型和参数变化敏感。
-
----
-模糊控制
-是一种基于模糊逻辑的控制方法，模仿人类的经验决策过程。它将输入变量（如误差和误差变化率）进行模糊化（如“正大”、“负小”等语言变量），通过预设的模糊规则库进行推理，最后解模糊化得到精确的控制输出。
-特点：
-不依赖精确数学模型，适合非线性、时变或难以建模的系统，鲁棒性强，但规则设计依赖经验，调试复杂
-
----
-总结：
-如果系统模型明确、线性、控制精度要求高，建议用PID控制。
-如果系统难以建模、非线性、存在不确定性，建议用模糊控制。
-
-### 10 机械臂出现轨迹抖动，或者说关节不连续，有可能是因为什么原因造成的？
-1）轨迹规划层（Trajectory Planning）
-- 轨迹平滑性不足（路径不连续或加速度跳变），贝塞尔曲线 B样条插值
-- 逆运动学（IK）求解不稳定，对于冗余自由度机械臂 IK 解不唯一，导致奇异点附近IK解算器输出跳变
-2）运动控制层（Motion Control）
--  控制器增益设置不当（PID / 力矩环震荡）
-现象：关节在目标位置附近高频抖动（小幅度振荡），尤其在低速或静止时明显。
-原因：位置环或速度环 PID 增益过高，导致系统震荡；力矩环带宽过高，激发结构柔性模态；未做摩擦补偿或前馈控制，导致稳态误差 + 积分饱和。
-- 采样频率不一致或通信延迟
-### 11 如果是关节的解不是唯一的，这个时候应该怎么做？
-关节限位 + 避障代价
-### 12 Docker的主要步骤
-- 1.创建Dockerfile ：定义基础镜像、安装依赖、配置环境变量等
-- 2.编写启动脚本 ：在项目中有 docker/entrypoint.bash ，用于容器启动时执行的命令 
-设置ROS2环境变量、构建工作空间、启动相关节点
-- 3.运行脚本 ： docker/run.bash 用于简化Docker容器的启动
-这种方式的优点是：
-- 环境一致性：所有开发者使用相同的环境
-- 依赖隔离：避免系统依赖冲突
-- 便于部署：可以轻松在不同机器上运行
-### 13 git基本操作
-
-## 26.1.26 iData具身智能算法
-### 1.手眼标定相关，怎么校准，有没有自动校准
-- 手眼标定的基本原则，深度不变，尽量多角度
-### 2.为什么用五次多项式，和三次多项式比有什么优点
-- 选五次多项式的核心是补齐了加速度的边界约束，实现位-速-加全连续：三次多项式仅能约束位、速，加速度无约束导致拼接处跳变，有硬件冲击
-- 五次多项式多2个加速度约束，从根源消除了突变，跃度也连续可优化，运动更平滑，同时避开了高阶多项式的龙格现象和高求解成本，是工程上平滑性和效率的最优选择，也是机器人、自动驾驶轨迹规划的标配。
-
-### 4.VLA和传统的规控相比有什么优势？
-- 传统规控感知、决策控制分离，依赖精确的运动学动力学模型，PID,MPC
-- VLA端到端策略，泛化性好(相对来说)，多模态数据，预训练大模型
-### 5.脚部电机互斥机制是什么，怎么实现的
-- 通过标志位实现腿部电机和手臂电机的双向互斥，确保二者不能同时运动。
-### 6.rl训练大概做了什么？奖励函数怎么设定的？
-
-### 7.sim2real中的难点是什么，会存在哪些问题，应该怎么解决？
-- 物理误差：摩擦系数、关节间隙、电机延迟、力控精度误差、环境扰动（如气流、震动、光照变化）
-- 视觉误差：仿真画面无噪点、无运动模糊，真实相机有曝光、白平衡、畸变；仿真物体纹理单一，真实世界有反光、阴影、遮挡
-- 动作误差：动作执行有延迟比如指令移动 10cm，实际只动 9.5cm）；反馈信号（如力传感器、视觉反馈）有噪声、采样延迟
-- 解决方法：
-    1.域随机化（Domain Randomization）
-    2.域适应（Domain Adaptation）
-### 8.机械臂做路径规划的时候，怎么避免碰撞的
-- urdf中增加限位
-- 笛卡尔路径规划
-
-## 26.2.11 星尘智能
-### 1.go函数里面的原理？笛卡尔路径规划的原理？
-- go() = plan() + execute()
-    plan路径规划，OMPL(RRTconnect)
-    execute执行规划好的路径
-    包含碰撞、逆运动学KDL、执行控制
-- 笛卡尔路径：
-    线性插值+ik解算
-### 2.RL相关知识 什么是离线学习，什么是在线学习，大概各自的算法有哪些？
-- 在线强化学习（Online RL）：智能体一边和环境交互，一边学习，用的是自己刚产生的新数据。PPO、SAC、TD3
-- 离线强化学习（Offline RL）：只用现成的数据集学习，不和环境交互。CQL、IQL、TD3+BC
-### 3.VLA数据有什么采集方法？
-- 遥操作，通过手柄 / VR / 键盘 / 鼠标远程操控机器人，同步采集相机图像流、语言指令、机器人关节动作序列，事后自动标注或人工补语言描述 OpenVLA
-- 仿真数据采集
-### 4.逆运动学解算的原理是什么？用的什么方法？
-- 逆运动学：已知末端位姿，求关节角。解算本质是解非线性方程组。
-    1.解析法：快、专用、靠几何推导
-    2.数值法：通用、迭代、靠雅可比 / 优化
-- 6轴工业臂：解析 IK（几何法）
-- 7 轴及以上冗余臂：数值 IK（雅可比 + 阻尼最小二乘）
-- 仿真、规划、RL、VLA：数值 IK / 优化型 IK
-- ROS、MoveIt：用的是 TRAC-IK、KDL 数值求解器
-### 5.冗余自由度有什么解算方法
-- 雅可比伪逆 + 零空间投影
-零空间可以在不影响末端的前提下：让臂远离障碍物、远离关节极限、远离奇异点、让运动更平滑
-- 阻尼最小二乘法：
-\[
-\mathbf{J}^* = \mathbf{J}^T (\mathbf{J} \mathbf{J}^T + \lambda^2 \mathbf{I})^{-1}
-\]
-### 6.sim2real中的难点是什么，会存在哪些问题，应该怎么解决？
-- 同上
-### 7.设计强化学习策略的时候有哪些方法论？
-
-### 8.PPO算法相关,大致介绍一下
-
-##  诺亦腾算法实习生-数据
-### 1.RL训练的输入观测量是什么？
-
-### 2.遥操为什么不一直用？
-- 
 
 # RL项目实践复盘&Isaaclab使用
 ## 25.12.27 ｜ 环境定义架构
@@ -1179,11 +1066,11 @@ VLM 只由 FAST token 的离散交叉熵监督，action expert 可以 attention 
 | Prompt | 语言指令 | 语言 + 自动生成子任务 | 语言 + 子任务 + subgoal 图 + metadata |
 | 关键设计 | Flow matching + 双专家 | FAST 预训练 + 层次化推理 | Episode metadata + 知识隔离 |
 
-### pico ego pipeline
+## pico ego pipeline
 
 把 PICO 头显采集的第一人称视角原始数据（视频 + tracking + 片段标注）转换成 **LeRobot v2.1** 数据集，用于 VLA 模型（pi0.5）预训练。
 
-#### 输入与输出
+### 输入与输出
 
 **输入**：每个采集会话目录包含
 - `CameraRecord_*.mp4`：原始头显视频
@@ -1194,7 +1081,7 @@ VLM 只由 FAST token 的离散交叉熵监督，action expert 可以 attention 
 
 **输出**：标准 LeRobot 数据集（`data/` / `videos/` / `meta/`），`observation.state` 与 `action` 均为 **20D**（每只手 `xyz(3) + 6D rotation(6) + gripper(1) = 10D`，6D 旋转用 Zhou et al. 2019 的"旋转矩阵前两列展平"）。
 
-#### 流水线步骤
+### 流水线步骤
 
 入口 `run_pipeline.py` 递归扫描顶层目录下所有会话，按以下步骤逐个处理：
 
@@ -1209,7 +1096,7 @@ VLM 只由 FAST token 的离散交叉熵监督，action expert 可以 attention 
 | **5** | 生成 LeRobot `meta/`（info.json、stats、episodes.jsonl、tasks.jsonl 等） | `04_lerobot_meta_generate.py` |
 | **6**（可选） | `--auto-merge` 合并所有单会话数据集到 `_merged/`，**视频用 symlink** 节省空间 | `05_merge_lerobot_datasets.py` |
 
-#### 质量过滤的两层设计
+### 质量过滤的两层设计
 
 1. **硬过滤**：任一命中直接淘汰
    - 相机标定无效（去畸变会崩）
@@ -1225,7 +1112,7 @@ VLM 只由 FAST token 的离散交叉熵监督，action expert 可以 attention 
 
    下游训练时可按 quality 筛选/加权（pi0.7 那种 multimodal prompting 的思路）。
 
-#### 关键设计点
+### 关键设计点
 
 - **20D action 维度** 是为了对齐 VLA 输入；6D rotation 而非欧拉/四元数，避免不连续性。
 - **视频帧率统一在 Step 2 完成**，Step 4 不再重编码，避免重复 transcoding 损失质量。
@@ -1233,46 +1120,258 @@ VLM 只由 FAST token 的离散交叉熵监督，action expert 可以 attention 
 - **OSS FUSE 写视频问题**：所有 ffmpeg / cv2.VideoWriter 输出必须先写本地 FS 再 `cp`，已封装在 `staged_writer`（见上节）。
 - **并行**：单会话内 Step 1 / Step 4 并行；多会话之间用 `--workers` 控制 ThreadPoolExecutor。
 
-### OSS FUSE 写 MP4 时 moov atom 丢失的根本原因
 
-**问题现象**：用 ffmpeg / cv2.VideoWriter 直接把 mp4 写到 OSS FUSE 路径（`/mnt/pico_data`）时，文件能写出但播放器打不开、ffprobe 报 moov 缺失，典型报错 `Error writing trailer: Invalid argument`。
+## 基于 OpenPI 0.5 开发两套 Policy：Egocentric 与 UMI/遥操
 
-#### 1. MP4 写入需要 seek
+为了让 Pico 第一视角数据和松灵双臂的 UMI/遥操数据共用同一个 π0.5 模型，开发了 `pi05_pico` 和 `pi05_kaiumi` 两套 policy。**核心原则**：π0.5 backbone 与 base checkpoint 完全共享，差异只放在 policy 的 input/output transform 层——让两种数据用同一份权重起步，方便阶段式迁移（pico pretrain → kaiumi midtrain → 遥操 posttrain）。
 
-MP4 文件主要由两个 atom 组成：
-- `mdat`：实际编码数据，编码过程中顺序追加；
-- `moov`：每帧偏移、时长、编解码参数等索引，**必须等所有帧编完才能算出**。
+### 1. 两套 Policy 对照
 
-主流 muxer（ffmpeg / OpenCV）的标准写入流程：先占位写 `mdat`，编码结束后构造 `moov` 写到文件尾，再 **`seek` 回头**把 `moov` 搬到文件首部（faststart 重排，方便边下边播）。
+|  | `pi05_pico` | `pi05_kaiumi` |
+|---|---|---|
+| 数据来源 | Pico VR 头显第一视角 | 松灵双臂 UMI 采集 / 遥操 |
+| state/action 维度 | **20D**：(3 xyz + 6 6D-rot + 1 gripper) × 2 手 | **14D**：(6 joint + 1 gripper) × 2 手 |
+| 动作空间 | 末端位姿（手部 tracking 解出） | 关节角度 |
+| 相机 | 仅 `cam_high`（单目第一视角） | `cam_high` + 双 wrist（三相机全启用） |
+| delta mask | `(3, -7, 3, -7)`：xyz delta，rot/gripper absolute | `(6, -1, 6, -1)`：joint delta，gripper absolute |
+| Inputs/Outputs | `PicoEgoInputs/Outputs`（新写） | `AlohaInputs/Outputs`（直接复用 aloha_policy） |
+| `adapt_to_pi` | — | `True` |
 
-> **关键**：close 阶段那一步 seek 是回头写已经存在的偏移，不是顺序追加。
+### 2. 共同的模型骨架
 
-#### 2. OSS FUSE 不支持 seek + write
-
-OSS 对象存储本身**不可变**（PutObject 是原子全量写），ossfs2 用 multipart upload 来模拟"追加"，因此：
-
-- ✅ 顺序 append → multipart upload，OK
-- ✅ 顺序 read → GetObject Range，OK
-- ❌ **seek + write 已写过的偏移** → OSS 不支持对象局部更新，ossfs2 也没有完整本地缓存来撑随机写
-
-所以一旦 muxer 在 close 时做 faststart 重排，那一刻就必然失败。
-
-理论上 fragmented MP4（`-movflags +empty_moov+default_base_moof`）把 `moov` 拆成多个 `moof` 片段与 `mdat` 交错顺序写，可以绕过 seek，但 cv2.VideoWriter 没把这个选项透出来，所以默认行为下必崩。
-
-#### 3. 解决方案：staged writer
-
-既然 muxer 必须 seek，那就**让 seek 发生在本地 FS 上**，写完整再一次性顺序传到 OSS：
-
-```
-encoder → 本地高速 FS（tmpfs / CPFS）→ 完整 mp4
-                ↓ sequential cp
-            OSS FUSE refined/
+```python
+Pi0Config(
+    pi05=True,                          # PI0.5 骨架（FAST 离散监督 + adaRMSNorm）
+    action_horizon=ACTION_HORIZON,
+    paligemma_variant="gemma_2b",       # USE_LORA=True 时切 gemma_2b_lora
+    action_expert_variant="gemma_300m",
+    discrete_state_input=False,         # state 走 PI0 风格连续投影
+)
+# 都用 PI05_BASE_CHECKPOINT_PATH 起步 + CosineDecaySchedule + ema_decay=None
 ```
 
-`cp` 对 OSS FUSE 来说就是把整个文件作为一次 multipart upload 写出，全程顺序无 seek，因此能成功。
+`discrete_state_input=False` 是**非 PI0.5 默认**的组合——骨架是 PI0.5，但 state 走 PI0 的连续 `state_proj`。原因是 Pico 的末端位姿和 UMI 的关节角度都是连续物理量，离散 tokenize 反而失真。
 
-项目里统一封装在 `python/staged_writer.staged_oss_output`（context manager），face_blur / VideoSplitRefiner 等所有写 mp4 的 refiner 都套这个 wrapper。
+### 3. Pico Ego 的两个关键设计点
 
-#### 4. 一句话总结
+**(1) 单目兼容三相机 base ckpt**（最有意思的工程取舍）：base 是按 3 相机训的，但 Pico 只有第一视角。直接改模型结构会破坏 base 权重，所以走 mask 路线——把两路 wrist 用零图填充，对应 `image_mask` 设为 `False`，attention 自动忽略这两路。base ckpt 完全不动就能吃单目数据。
 
-> MP4 要求 close 时 seek 回头写 `moov`，而 OSS FUSE 底层是不可变对象存储只能顺序写——所以必须先在本地写完整文件，再顺序 `cp` 上 OSS。
+**(2) 旋转选 6D + absolute，xyz 选 delta**：xyz 是欧氏空间的平移量，delta 物理上就是位移，最好学；旋转用 6D（连续可微无双覆盖）+ absolute（绕开 SO(3) 上 delta 怎么定义的坑）。这套维度选择是踩了"四元数 + 全 delta"的坑之后定下来的，详见下方"遇到的问题 #2"。
+
+### 4. KaiUmi 的设计：直接复用 Aloha 接口
+
+松灵双臂的形态（6-DoF + gripper × 2 = 14D）和 Aloha 完全一致，所以 `kaiumi_policy.py` 直接派生自 `aloha_policy.py`，保留 `adapt_to_pi=True`：
+
+- `_joint_flip_mask`：把 Aloha joint 约定翻成 π0 内部约定（部分 joint 符号反转）；
+- `_gripper_to/from_angular`：Aloha gripper 是线性归一化（米），π0 是角度归一化（弧度），双向换算来自 Interbotix datasheet。
+
+inputs 做正向（数据集 → 模型），outputs 做逆向（模型 → 真机）。三相机和 base ckpt 完全对齐，无需任何 trick。
+
+### 5. 关键设计要点速查
+
+| 设计点 | 选择 | 一句话原因 |
+|---|---|---|
+| 模型架构 | 完全共享 π0.5 backbone | base ckpt 复用 + 阶段式迁移 |
+| state 编码 | 连续投影（非默认） | 连续物理量，离散化反而失真 |
+| Pico 单目 | 零图 + image_mask=False | 不改模型结构兼容三相机 ckpt |
+| 旋转表示 | 6D rotation + absolute | 连续可微 + 绕开 SO(3) delta（详见踩坑 #2） |
+| LoRA / 全参 | `USE_LORA` 环境变量切换 | LoRA 节省显存适合小数据 |
+| EMA | `ema_decay=None` | 微调阶段 EMA 收益有限 |
+
+
+## 遇到的问题以及一些细节
+
+### 1. OSS FUSE 写 MP4 时 moov atom 丢失
+
+- 问题现象：用 ffmpeg 或 cv2.VideoWriter 把 mp4 直接写到 OSS FUSE 挂载路径（`/mnt/pico_data`）时，文件能写出但 ffprobe 报 moov 缺失、播放器打不开，典型报错 `Error writing trailer: Invalid argument`。
+
+- 原因：MP4 文件由两个核心 atom 组成——`mdat` 存编码数据（编码过程中顺序追加），`moov` 存每帧偏移和编解码参数等索引（必须等所有帧编完才能算出）。主流 muxer 的标准流程是先占位写 `mdat`，结束时构造 `moov` 写到文件尾，再 seek 回头把 `moov` 搬到文件首部做 faststart 重排，方便边下边播。而 OSS 对象存储本身不可变（PutObject 是原子全量写），ossfs2 用 multipart upload 模拟追加，只支持顺序 append 和顺序 read，不支持回头改写已写过的偏移。所以一旦 muxer 在 close 时做 faststart 重排，那一刻就必然失败。
+
+- 解决方案：用 staged writer 模式，让 seek 发生在本地 FS 上，写完整后再一次性顺序传到 OSS。即 encoder 先把完整 mp4 写到本地高速 FS（tmpfs 或 CPFS），再用 `cp` 顺序复制到 OSS FUSE。`cp` 对 OSS FUSE 来说就是把整个文件作为一次 multipart upload 写出，全程顺序无 seek，因此能成功。项目里统一封装在 `python/staged_writer.staged_oss_output`（context manager），face_blur、VideoSplitRefiner 等所有写 mp4 的 refiner 都套这个 wrapper。
+
+### 2. Pico action 表示踩坑：从「四元数 + 全 delta」到「6D rotation + xyz delta + 旋转 absolute」
+
+- 问题现象：Pico ego policy 最初版本用 `xyz (3) + 四元数 (4) + gripper (1) = 8D` 作为单手动作表示，并且 **xyz、四元数都做 delta**。训练时旋转维度 loss 长期不下降、推理时手部姿态明显抖动甚至跳变，xyz 维度反而正常。
+
+- 原因（两个独立但叠加的问题）：
+
+  - **四元数双覆盖（±q 表示同一旋转）**：单位四元数 `q` 和 `-q` 几何上代表同一个旋转，但欧氏数值上差了一倍模长。Pico 头显的手部 tracking 在相邻帧偶尔会输出符号翻转的 q（解算时挑了相反的半球），如果直接 `Δq = q_t - q_{t-1}`，正常情况下是接近 0 的小向量，符号翻转那帧就会突然变成一个 |Δq| ≈ 2 的"伪大旋转"。训练数据里混了这种**完全虚假的大目标**，模型既学不到真规律，也压不住梯度。
+  - **四元数 delta 在欧氏空间没几何意义**：真正的"旋转之差"在 SO(3) 上应该用 `R_delta = R_t · R_{t-1}^T` 然后取 log map（转成轴角向量）才有意义；直接对四元数做欧氏减法既不是旋转增量，加回去之后单位长度也不再为 1，必须额外归一化，又会引入二次误差。所以**"四元数 + delta"这条路从原理上就走不通**。
+  - 附加问题：相比 xyz 这种本来就在欧氏空间的物理量，旋转 delta 对模型来说还要额外学一个非线性流形上的减法操作，难度更高。
+
+- 解决方案：把单手动作从 8D 改成 **10D = `xyz (3) + 6D rotation (6) + gripper (1)`**，双手合 20D，并调整 delta mask 为 `make_bool_mask(3, -7, 3, -7)`，即**只 xyz 做 delta，6D rot 和 gripper 全部 absolute**：
+
+  - **旋转表示换成 6D rotation**（Zhou et al. 2019，旋转矩阵前两列展平）：连续可微、没有双覆盖、用 Gram-Schmidt 就能反解出合法的旋转矩阵，对回归非常友好。
+  - **旋转改成 absolute（不做 delta）**：直接预测下一时刻的目标旋转矩阵，彻底绕开 SO(3) 上 delta 怎么定义这个坑。代价是模型每帧都要从头预测姿态，但实测 6D 表示足够稳定，没有性能下降。
+  - **xyz 仍然 delta**：xyz 是平移量，本来就在欧氏空间，delta 物理上就是位移（≈ 速度 × dt），对模型最友好。
+  - **gripper 仍 absolute**：开/合是绝对状态，delta 没有物理意义。
+
+- 教训：旋转表示在 VLA / IL 任务里是一个特别容易踩坑的点。**经验法则**：
+  - 模型回归用的旋转表示永远用 **6D rotation** 或**直接 absolute 旋转矩阵 / 9D**，不用欧拉角（万向锁 + 不连续）、不用四元数（双覆盖）；
+  - 旋转**绝对不做欧氏空间的 delta**，要做就得在 SO(3) 上用 log map 做（项目里没必要这么复杂，直接 absolute 最稳）；
+  - delta vs absolute 是 **per-维度独立选择**的事——位移 delta、旋转 absolute、夹爪 absolute 是一套实测最稳的组合。
+
+
+
+# 面试复盘
+## 25.10.10 海恒智能 机械臂算法工程师
+### 1 ros加moveit2 怎么做一些完整的运动规划和控制？
+1）机器人模型与配置
+- URDF:机器人描述文件，定义了机器人的几何结构、关节、连杆、传感器等。
+- SRDF：MoveIt2会自动生成的配置文件，在URDF的基础上增加了语义信息
+2）感知与环境建模
+- 传感器数据:接收来自深度相机（如Kinect）、激光雷达等传感器的点云数据。
+- 环境表示:Costmap，通常会订阅ROS2的话题实现
+3）运动规划 (Motion Planning)
+- 规划请求 (Planning Request) : 用户或上层任务发送的规划请求，包括：
+起始状态 (Start State) : 机器人的当前关节角度。
+目标状态 (Goal State) : 目标末端执行器位姿或目标关节角度。
+路径约束 (Path Constraints) : 运动过程中需要满足的约束，例如保持末端执行器姿态不变。
+障碍物信息 (Obstacle Information) : 来自环境建模的障碍物数据。
+规划器 (Planners) : MoveIt2集成了多种运动规划算法，包括采样式规划器和优化式规划器
+项目中的体现 : panda_pick_n_place.py 中通过Panda类中的 _panda.solve_ik 直接计算关节目标。
+如果使用MoveIt 2，会通过 move_group 接口发送规划请求，由MoveIt 2的规划器选择合适的算法生成轨迹。
+- 逆运动学求解器 (Inverse Kinematics Solvers) : 在规划过程中，规划器需要频繁调用逆运动学求解器来计算末端执行器目标对应的关节角度。
+项目中的体现 : self._panda.solve_ik(self._end_effector_target) 直接调用了Panda类逆运动学求解器。
+MoveIt 2通常会配置一个默认的IK求解器（如KDL或TRAC-IK）
+### 2 opencv中使用了哪一些算法？
+1）边缘检测（比如Canny）找出墙面上的“线条”
+2）轮廓检测（findContours）找出抹头的边缘位置
+3）霍夫直线变换（Hough Lines）拟合出这两条线的角度
+### 3 CAN通信两个节点在主线上无法通信，怎么排查问题？
+1）从软件角度：工作中遇到的实际bug案例，调度代码里面屏蔽了
+2）硬件角度：示波器看差分波形，看看显性隐性电平对不对；监听抓ACK故障位
+### 4 之前项目使用的CAN通信波特率是多少？
+500 kbit/s 注意单位
+### 5 多个模块在ROS中，是怎么管理的？
+1）引入组件（Component）机制，通过rclcpp_components实现运行时动态加载节点为共享库
+2）Docker容器化
+### 6 节点启动是怎么做的？
+launch文件
+### 7 ROS的通讯机制是什么？（分布式）
+分布式、异步、多对多
+### 8 PID的三个字母分别代表什么意思？有什么作用？
+P：比例，消除当前误差；
+I：积分，消除稳态残差；
+D：微分，预测未来误差变化，抑制超调。
+
+### 9 PID控制算法和模糊控制算法相比有什么优势和劣势？
+PID：
+是一种线性反馈控制算法，通过计算设定值与实际输出值之间的误差，对误差进行比例（P）、积分（I）和微分（D）三种运算，加权求和后作为控制量输出，驱动系统向目标靠拢。
+特点：
+结构简单、响应快、稳定性好，但对系统模型和参数变化敏感。
+
+---
+模糊控制
+是一种基于模糊逻辑的控制方法，模仿人类的经验决策过程。它将输入变量（如误差和误差变化率）进行模糊化（如“正大”、“负小”等语言变量），通过预设的模糊规则库进行推理，最后解模糊化得到精确的控制输出。
+特点：
+不依赖精确数学模型，适合非线性、时变或难以建模的系统，鲁棒性强，但规则设计依赖经验，调试复杂
+
+---
+总结：
+如果系统模型明确、线性、控制精度要求高，建议用PID控制。
+如果系统难以建模、非线性、存在不确定性，建议用模糊控制。
+
+### 10 机械臂出现轨迹抖动，或者说关节不连续，有可能是因为什么原因造成的？
+1）轨迹规划层（Trajectory Planning）
+- 轨迹平滑性不足（路径不连续或加速度跳变），贝塞尔曲线 B样条插值
+- 逆运动学（IK）求解不稳定，对于冗余自由度机械臂 IK 解不唯一，导致奇异点附近IK解算器输出跳变
+2）运动控制层（Motion Control）
+-  控制器增益设置不当（PID / 力矩环震荡）
+现象：关节在目标位置附近高频抖动（小幅度振荡），尤其在低速或静止时明显。
+原因：位置环或速度环 PID 增益过高，导致系统震荡；力矩环带宽过高，激发结构柔性模态；未做摩擦补偿或前馈控制，导致稳态误差 + 积分饱和。
+- 采样频率不一致或通信延迟
+### 11 如果是关节的解不是唯一的，这个时候应该怎么做？
+关节限位 + 避障代价
+### 12 Docker的主要步骤
+- 1.创建Dockerfile ：定义基础镜像、安装依赖、配置环境变量等
+- 2.编写启动脚本 ：在项目中有 docker/entrypoint.bash ，用于容器启动时执行的命令 
+设置ROS2环境变量、构建工作空间、启动相关节点
+- 3.运行脚本 ： docker/run.bash 用于简化Docker容器的启动
+这种方式的优点是：
+- 环境一致性：所有开发者使用相同的环境
+- 依赖隔离：避免系统依赖冲突
+- 便于部署：可以轻松在不同机器上运行
+### 13 git基本操作
+
+## 26.1.26 iData具身智能算法
+### 1.手眼标定相关，怎么校准，有没有自动校准
+- 手眼标定的基本原则，深度不变，尽量多角度
+### 2.为什么用五次多项式，和三次多项式比有什么优点
+- 选五次多项式的核心是补齐了加速度的边界约束，实现位-速-加全连续：三次多项式仅能约束位、速，加速度无约束导致拼接处跳变，有硬件冲击
+- 五次多项式多2个加速度约束，从根源消除了突变，跃度也连续可优化，运动更平滑，同时避开了高阶多项式的龙格现象和高求解成本，是工程上平滑性和效率的最优选择，也是机器人、自动驾驶轨迹规划的标配。
+
+### 4.VLA和传统的规控相比有什么优势？
+- 传统规控感知、决策控制分离，依赖精确的运动学动力学模型，PID,MPC
+- VLA端到端策略，泛化性好(相对来说)，多模态数据，预训练大模型
+### 5.脚部电机互斥机制是什么，怎么实现的
+- 通过标志位实现腿部电机和手臂电机的双向互斥，确保二者不能同时运动。
+### 6.rl训练大概做了什么？奖励函数怎么设定的？
+
+### 7.sim2real中的难点是什么，会存在哪些问题，应该怎么解决？
+- 物理误差：摩擦系数、关节间隙、电机延迟、力控精度误差、环境扰动（如气流、震动、光照变化）
+- 视觉误差：仿真画面无噪点、无运动模糊，真实相机有曝光、白平衡、畸变；仿真物体纹理单一，真实世界有反光、阴影、遮挡
+- 动作误差：动作执行有延迟比如指令移动 10cm，实际只动 9.5cm）；反馈信号（如力传感器、视觉反馈）有噪声、采样延迟
+- 解决方法：
+    1.域随机化（Domain Randomization）
+    2.域适应（Domain Adaptation）
+### 8.机械臂做路径规划的时候，怎么避免碰撞的
+- urdf中增加限位
+- 笛卡尔路径规划
+
+## 26.2.11 星尘智能
+### 1.go函数里面的原理？笛卡尔路径规划的原理？
+- go() = plan() + execute()
+    plan路径规划，OMPL(RRTconnect)
+    execute执行规划好的路径
+    包含碰撞、逆运动学KDL、执行控制
+- 笛卡尔路径：
+    线性插值+ik解算
+### 2.RL相关知识 什么是离线学习，什么是在线学习，大概各自的算法有哪些？
+- 在线强化学习（Online RL）：智能体一边和环境交互，一边学习，用的是自己刚产生的新数据。PPO、SAC、TD3
+- 离线强化学习（Offline RL）：只用现成的数据集学习，不和环境交互。CQL、IQL、TD3+BC
+### 3.VLA数据有什么采集方法？
+- 遥操作，通过手柄 / VR / 键盘 / 鼠标远程操控机器人，同步采集相机图像流、语言指令、机器人关节动作序列，事后自动标注或人工补语言描述 OpenVLA
+- 仿真数据采集
+### 4.逆运动学解算的原理是什么？用的什么方法？
+- 逆运动学：已知末端位姿，求关节角。解算本质是解非线性方程组。
+    1.解析法：快、专用、靠几何推导
+    2.数值法：通用、迭代、靠雅可比 / 优化
+- 6轴工业臂：解析 IK（几何法）
+- 7 轴及以上冗余臂：数值 IK（雅可比 + 阻尼最小二乘）
+- 仿真、规划、RL、VLA：数值 IK / 优化型 IK
+- ROS、MoveIt：用的是 TRAC-IK、KDL 数值求解器
+### 5.冗余自由度有什么解算方法
+- 雅可比伪逆 + 零空间投影
+零空间可以在不影响末端的前提下：让臂远离障碍物、远离关节极限、远离奇异点、让运动更平滑
+- 阻尼最小二乘法
+
+$$
+\mathbf{J}^* = \mathbf{J}^T (\mathbf{J} \mathbf{J}^T + \lambda^2 \mathbf{I})^{-1}
+$$
+### 6.sim2real中的难点是什么，会存在哪些问题，应该怎么解决？
+- 同上
+### 7.设计强化学习策略的时候有哪些方法论？
+
+### 8.PPO算法相关,大致介绍一下
+
+## 26.3.20 魔法原子 VLA算法工程师 一面
+
+### 1. 采集的 ego-centric 数据以及 umi 数据是怎么接入模型的？
+先统一转换成Lerobot 2.1 格式数据集，再通过两套policy，π0.5 backbone 和 base ckpt 完全共享，差异只在 input/output transform 层：
+- `pi05_pico`：单目第一视角，20D 末端位姿（每只手 3 xyz + 6 6D rotation + 1 gripper），缺失的双 wrist 用零图 + `image_mask=False` 补齐。
+- `pi05_kaiumi`：三相机，14D 关节空间（每只手 6 joint + 1 gripper），直接复用 Aloha 接口做 joint flip 和 gripper 角度换算。
+模型内部把所有 state/action pad 到 32 维统一进 Transformer，输出再截断回真实维度。
+
+### 2. 这两种数据是怎么 align 在一起的？
+
+**分层 align，能 align 的硬 align，不能 align 的用阶段式训练桥接**：
+- **能 align 的**：模型架构（同一份 Pi0Config + base ckpt）、数据格式（都用 LeRobot v2.1）、Tensor 维度（pad 到 32D）、图像通道（三相机接口）——全部强制对齐。
+- **不强行 align 的**：action 物理空间。Pico 是末端位姿、Kaiumi 是关节空间，物理意义不同，硬映射会丢信息。
+
+action 空间靠**三阶段课程式训练**桥接：
+```
+base ckpt → Pretrain (Ego) → Midtrain (UMI) → Posttrain (遥操) → final policy
+            数据量最大        过渡真机分布      精细 fine-tune
+```
+按"通用 → 半专用 → 精细"顺序学习，比把三类数据混训稳得多——混训时高方差的 ego 数据会淹没遥操精细信号。最终双臂操作任务完成率89%。
