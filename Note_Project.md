@@ -1354,3 +1354,58 @@ base ckpt → Pretrain (Ego) → Midtrain (UMI) → Posttrain (遥操) → final
             数据量最大        过渡真机分布      精细 fine-tune
 ```
 按"通用 → 半专用 → 精细"顺序学习，比把三类数据混训稳得多——混训时高方差的 ego 数据会淹没遥操精细信号。最终双臂操作任务完成率89%。
+
+
+## 26.3.22 魔法原子 VLA算法工程师 二面
+
+### 1. 既然 Pretrain 阶段冻结了 action expert，那 pretrain 的输入输出是什么？用什么监督？
+
+**输入 / 输出 / 监督跟全参微调完全一样**，flow matching MSE 一路不变（`src/openpi/models/pi0.py::compute_loss`）：
+
+- **输入**：`cam_high` 图像（缺的双 wrist 用零图 + `image_mask=False`）+ language tokens + 20D state + ground-truth action chunk `[B, 50, 20]`。
+- **输出**：`v_t = action_out_proj(suffix_out[:, -H:])`，即未来 50 步的向量场。
+- **监督**：`L = ‖v_t − (noise − actions)‖²`。
+
+**"冻结 action expert"的实际范围比字面小**
+
+`_build_freeze_filter()` 里 `TRAIN_ACTION_EXPERT=false` 只冻 PaliGemma 内部双专家中 `.*_1.*` 后缀的 Gemma-300M expert 权重；模型外层的 `action_in_proj / state_proj / action_out_proj / time_mlp` 等小投影头**不在 freeze 范围内，仍然可训**。Pretrain 实际训练的是：**SigLIP + Gemma-2B LLM + 这些小投影头**。
+
+**冻结到底改变了什么——只换梯度的消费方**
+
+Loss 还是作用在 `v_t` 上，梯度反向穿过整个双专家 Transformer。经过 frozen action expert 的部分被丢弃，但通过双专家联合 attention，**梯度仍然流回 VLM**，驱动 VLM 学到"能让 frozen action expert 解码出 ego 动作"的视觉/语言表征。
+
+**为什么这么设计**
+
+- Action expert 在 `pi05_base` 里已经学到了通用 motor prior，用 Pico ego 这种噪声大、视角新的数据全参微调会污染它；
+- 真正需要适配的是 VLM——第一人称视角与遥操第三人称差异极大，必须重学；
+- 思想上与 PI0.7 的 **KI（Knowledge Isolation）** 镜像：KI 是冻 VLM 训 action expert + FAST 离散监督；这里是冻 action expert 训 VLM + flow matching 监督。共同原则——**保护一侧预训练先验，只更新另一侧**。
+
+### 2. 那 pi05 本身的 VLM 是靠什么监督？这个监督具体指什么？
+
+要分两个语境：
+
+**(a) PI 实验室预训练 `pi05_base` 时**
+
+VLM 被 **FAST 离散动作 token 的下一 token 交叉熵**直接监督（详见前文「PI0 训练流程笔记」§6.3）。两阶段：
+
+| 阶段 | α | VLM 监督 | Action expert |
+|---|---|---|---|
+| FAST 预训练 | 0 | FAST token 下一 token 交叉熵 | 关 |
+| Flow matching 后训练 | 10 | 仍被 FAST 交叉熵监督 | flow matching MSE |
+
+联合损失：`L = H(FAST_tokens) + α · ‖v_θ − u_τ‖²`
+
+FAST token 是把连续 action chunk 经 DCT + BPE 离散化得到的整数序列；监督 VLM 就是让它把这个序列像"句子"一样一个个吐出来——本质就是 next token prediction，复用 LLM 的训练范式。
+
+**(b) 我们在 ego 数据上做 Pretrain 时**
+
+openpi 这套代码 `compute_loss` 只算 flow matching MSE，**FAST 路径没启用**。VLM 没有独立监督，只能靠 MSE 通过双专家联合 attention 反向传播——这也是为什么必须冻 action expert，否则 expert 会"独吃"梯度，VLM 学不动。
+
+**"监督"具体指什么**
+
+= 数据集里有"标准答案" → 模型预测与答案的差 = loss → 梯度 → 更新参数。同一份 action chunk 真值，可以走两种监督路径：
+
+- 离散：FAST token 序列 → 交叉熵
+- 连续：action chunk 张量 → flow matching MSE
+
+PI0.5 base 训练时两条路径并存（FAST 给 VLM、MSE 给 action expert + VLM）；下游 Pretrain (Ego) 阶段只剩 MSE 这一路。
