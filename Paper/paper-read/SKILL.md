@@ -20,7 +20,7 @@ Before writing, inspect the target folder for the PDF, existing notes, images, a
 
 2. Create or select the paper folder:
    - For a new paper, create a dedicated folder under `Paper/` before writing the note.
-   - Name new folders as `<ShortName>_<OrgOrLab>_<PaperYear>_<YYMMDD>`, where `<YYMMDD>` is the naming date, for example `HumDex_USC-PSI_2026_260616`.
+   - Name new folders as `<YYMMDD>_<ShortName>_<OrgOrLab>_<PaperYear>`, where `<YYMMDD>` is the naming date, for example `260616_HumDex_USC-PSI_2026`.
    - Put the main note, PDF, images, and auxiliary notes in that folder together.
    - If the user already provided a folder or an existing folder clearly matches the paper, reuse it.
 
