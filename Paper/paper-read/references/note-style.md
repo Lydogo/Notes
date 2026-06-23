@@ -116,7 +116,7 @@ Use 2-3 numbered points:
 ## Naming
 
 - Folder: create one folder per paper under `Paper/`, named `<ShortName>_<OrgOrLab>_<PaperYear>_<YYMMDD>` by default.
-- Use `<YYMMDD>` as the naming/creation date in local time. For example, June 16, 2026 becomes `_260616`.
+- Use `<YYMMDD>` as the PDF file's modification/creation date in local time (check with `stat`). For example, a PDF last modified on June 16, 2026 yields `_260616`.
 - Main note filename: use the canonical paper name without the naming-date suffix, `<ShortName>_<OrgOrLab>_<PaperYear>.md`, unless the user explicitly asks for mirrored folder/file names.
 - Keep PDFs with their arXiv id or original filename.
 - Auxiliary code notes may use names like `openpi05_code_walkthrough.md` or `<paper>_code_learning.md`.
