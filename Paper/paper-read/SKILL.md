@@ -21,7 +21,7 @@ Before writing, inspect the target folder for the PDF, existing notes, images, a
 2. Create or select the paper folder:
    - For a new paper, create a dedicated folder under `Paper/` before writing the note.
    - Name new folders as `<YYMMDD>_<ShortName>_<OrgOrLab>_<PaperYear>`, where `<YYMMDD>` is derived from the PDF file's modification/creation date in local time (use `stat` to check), for example `260616_HumDex_USC-PSI_2026`.
-   - Put the main note, PDF, images, and auxiliary notes in that folder together.
+   - Put the main note, images, and auxiliary notes in that folder together. Treat the PDF as a temporary source file and remove it after the note passes the final check.
    - If the user already provided a folder or an existing folder clearly matches the paper, reuse it.
 
 3. Extract the paper:
@@ -47,6 +47,7 @@ Before writing, inspect the target folder for the PDF, existing notes, images, a
    - Ensure all tables render in Markdown.
    - Ensure "灵魂三问" answers are concise, comparative, and evidence-driven.
    - If updating an existing note, keep unrelated user content intact.
+   - After the Markdown note is created and checked, remove the source PDF. If the PDF was moved into the paper folder during organization, delete that copy too; keep only the Markdown note and any necessary images or auxiliary notes.
 
 ## Style Reference
 
@@ -56,6 +57,7 @@ Read `references/note-style.md` when creating or substantially rewriting a note.
 
 - Save one main note per paper folder as `<ShortName>_<OrgOrLab>_<PaperYear>.md` by default.
 - Always create or reuse a matching paper folder under `Paper/`; do not leave new paper notes directly under `Paper/`.
+- Do not retain the original PDF after the Markdown note is generated and verified. The PDF is a temporary source artifact, not part of the final paper folder.
 - Use the date suffix on newly created folder names, not on the main note filename, unless the user explicitly asks for mirrored names.
 - Prefer Markdown tables for experiment summaries and ablations.
 - Add extra sections after "个人总结" only when the paper has a recurring concept worth preserving, such as metadata taxonomy, code walkthrough notes, or framework comparisons.
