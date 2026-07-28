@@ -11,6 +11,8 @@ Use this skill to turn a paper, PDF, project page, or existing paper folder into
 
 Before writing, inspect the target folder for the PDF, existing notes, images, and code-reading notes. If source metadata/results may be stale, verify against primary paper/project/arXiv sources.
 
+The user is currently researching robotics VLA models, with a particular focus on pre-training. When a paper touches data scaling, action representation, embodiment alignment, world modeling, visual grounding, trajectory/action supervision, or staged training recipes, make those mechanisms especially clear and connect them naturally to nearby VLA pre-training work. Do this through concrete technical explanation, comparisons, and implications rather than adding a stiff framing sentence to the note.
+
 ## Workflow
 
 1. Gather sources:
