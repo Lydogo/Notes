@@ -80,7 +80,7 @@ egocentric 数据从约 20,000 小时筛到 10,000 小时，流程包括：
 | reserved | 4 |
 | 总计 | 55 |
 
-这个设计的关键不是所有机器人都有 55 维动作，而是用 padding/mask 让不同 embodiment 落到同一个 action schema 中。这样模型能在统一接口下同时学习单臂、双臂、半人形、人形、移动平台和灵巧手数据。
+这个设计的关键不是所有机器人都有 55 维动作，而是用 padding 让不同 embodiment 落到同一个 action schema 中；工程实现里还需要清楚区分 padded dimension 和真实零值。这样模型能在统一接口下同时学习单臂、双臂、半人形、人形、移动平台和灵巧手数据。
 
 #### 自动语言标注
 
@@ -130,6 +130,53 @@ LingBot-VLA 2.0 在 action expert 的 transformer block 中把 FFN 替换为 spa
 - MeanStd normalization 优于 MinMax 和 Q01-Q99；
 - L2 loss 平均优于 L1，但 L1 在 contact-rich 的 Squeeze Ketchup 上更稳。
 
+### 3.4 数据使用与维度追踪
+
+这篇论文真正值得从算法工程角度细读的是数据链路。LingBot-VLA 2.0 不是“拿一个大模型直接训 robot action”，而是先把异构 embodiment、视频、语言、状态和动作整理成可混训的统一数据接口。
+
+| 数据源 | 规模 | 样本单位 | 模态/字段 | 关键维度 | 标签/动作 | 用途阶段 | 处理方式 |
+|---|---:|---|---|---|---|---|---|
+| 机器人轨迹原始池 | 约 90,000 h | episode / trajectory | 多视角视频、state、action、robot metadata | 20 embodiments；多数 robot policy frequency 为 30 Hz；各平台 DoF 不同 | 原始 robot state/action | 数据清洗前 | 轨迹平滑性、静止段、视频-状态对齐、视频质量检查 |
+| 高质量机器人轨迹 | 约 50,000 h | episode / action chunk | RGB、language instruction、state、action | 统一映射到 55 维 state/action schema；缺失 body part 用 padding | 55 维 canonical action/state 中的有效维度；mask 编码论文未说明 | VLA 预训练主体 | embodiment-specific 阈值过滤、URDF 投影人工核验、多视角同步检查 |
+| Egocentric human videos 原始池 | 约 20,000 h | video clip / hand trajectory | 第一视角视频、手部轨迹、可选动作标签 | Ego 行在表 1 中 arm DoF 记为 14，policy frequency 30-60 Hz | 世界坐标系 hand trajectory，训练时转到当前相机坐标系 | 预训练中补充人类操作先验 | VLM 预筛、SLAM、MANO hand pose、轨迹标准化和质量控制 |
+| 高质量 egocentric 数据 | 约 10,000 h | sampled frame + future hand trajectory | 当前第一视角 observation、未来手部轨迹 | 论文给出坐标变换公式，但未报告图像分辨率/clip 长度 | 当前相机坐标系下的未来 hand trajectory | 预训练辅助数据流 | 有标签数据做时间戳/坐标/完整性整理；无标签视频重建手轨迹 |
+| 自动语言标注 | 覆盖 manipulation videos | video-level task + subtask segment | 多视角视频、动作类别、对象、instruction、时间边界 | 闭集 18 类：15 个 primitive + transit/idle/other | video-level instruction + subtask instruction | 语言条件监督 | Qwen3.6-27B 自动分段；多相机平台联合 overhead/wrist views |
+| DINO-Video teacher 数据 | 5M video clips | 16-frame clip | Internet、egocentric、robot videos | 每样本均匀采样 16 帧；使用有效帧率做 absolute temporal encoding | causal video representation | dual-query distillation teacher | DINOv3 初始化 + causal temporal attention + 3D-RoPE |
+| 后训练开源接口 | 用户自定义 LeRobot v2.1/v3.0 数据 | LeRobot dataset + robot config | raw states/actions/images | 由 `configs/robot_configs/*.yaml` 映射到统一 feature space | 下游 robot action | post-training / deployment | 准备 dataset、定义 feature mapping、计算 `norm_stats/*.json` |
+
+**样本怎么变成模型监督**
+
+1. 对机器人数据，一个训练样本可以理解为：当前/历史 observation + language instruction + robot state，监督目标是未来 action chunk。论文把未来 horizon `T` 设为 action chunk size，但没有报告具体 chunk 长度。
+
+2. 对 egocentric 数据，世界坐标系只是存储格式。训练时从视频中采样当前帧 `t`，再用当前相机外参把未来 hand trajectory 从世界坐标系变换到当前相机坐标系：`p_tau^{C_t} = T_{C_t<-W} p_tau^W`。这一步很关键，因为它把“相机自己在动”和“手在操作”解耦，否则第一视角视频里的手轨迹会混入头部/身体运动。
+
+3. 对语言数据，Qwen3.6-27B 不只是生成一句全局 caption，而是做 video-level instruction + subtask-level instruction。subtask 边界主要在交互对象变化、动作类别变化或持续 pause 时切分；抓取、搬运、释放同一对象会被合并成一个 subtask，避免把一个连续操作切得过碎。
+
+4. 对后训练/开源代码，官方 README 明确要求三步：准备 LeRobot dataset，写 robot config 把 raw state/action/image key 映射到统一 feature space，计算 normalization statistics。以 RoboTwin 配置为例，图像 key 映射到 `camera_top`、`camera_wrist_left`、`camera_wrist_right`，state/action 拆成 arm position 和 effector position。这说明 55 维统一表示不是论文里的抽象图，而是通过 per-robot config 落到数据加载层。
+
+**维度快照**
+
+- Observation: 多视角 RGB；论文说明 overhead + wrist views 会用于自动标注，但没有报告训练输入图像分辨率、crop/resize、视觉 token 数或 view dropout 策略。
+- Language: video-level instruction + subtask instruction；自动标注模型为 Qwen3.6-27B；tokenizer、最大 token 长度和 language mask 论文未说明。
+- State: 统一 55 维 canonical vector，包含 arm joint 14、EEF pose 14、gripper 2、hand joint 12、waist 4、head 2、mobility 3、reserved 4。
+- Action: 同样走 55 维 schema；EEF pose 每臂 7 维，即 XYZ + quaternion；single-arm 或缺失 body part 的维度 padding；具体 mask 编码方式论文未展开。
+- Prediction target: action chunk；future query `Q_{t+T}` 的 `T` 等于 action chunk size，但具体 chunk size 未报告。
+- Control frequency: 表 1 中机器人数据多为 30 Hz，egocentric 数据为 30-60 Hz；部署侧 README 给出 RTX 4090D 上 10 denoising steps 约 130 ms/次推理。
+
+**预处理链路拆解**
+
+- 轨迹质量：对 action/state 计算 jerk、velocity Z-score、acceleration Z-score；任一超过 per-embodiment 阈值就丢弃。
+- 静止过滤：如果 episode 中超过 95% 时间 state/action 几乎无变化或不变，则认为缺少有效控制监督，直接删除。
+- 视频-状态对齐：用对应 URDF 把 recorded states replay/projection 到图像平面，再由人工检查投影机器人和真实视频是否 mismatch。
+- 视频质量：人工过滤模糊、严重遮挡、掉帧、多视角不同步。
+- Ego 过滤：先用 VLM 去掉第三视角、纯走路、无清晰手物交互、无可操作物体、非操作者手部干扰明显的视频。
+- Ego 重建：有 action/hand labels 的数据做 metadata、timestamp、coordinate transform、trajectory completeness；无 action labels 的数据跑 egocentric SLAM + hand pose estimation，恢复 camera extrinsics、MANO 参数和世界坐标系手轨迹。
+- Ego 质量控制：有效手部帧比例低于 20%、SLAM 二阶运动异常、hand trajectory 位移/速度/加速度/jerk 突变、违反人体运动约束的片段都会被过滤。
+
+**对 VLA 工程实现的启发**
+
+这套数据设计的核心不是“60,000 小时”这个数字，而是把训练样本统一成 canonical action/state schema。对一个工程实现来说，真正需要复现的不是所有数据量，而是三件事：第一，raw dataset 到 unified feature 的映射配置；第二，针对每个 embodiment 的动作统计和 normalization；第三，多源数据进入同一个 action expert 时的 padding/mask 语义是否清楚，否则模型很容易把“没有这个关节”和“这个关节值为 0”混淆。
+
 ## 四、实验与结果
 
 ### 4.1 实验设置
@@ -142,6 +189,8 @@ LingBot-VLA 2.0 在 action expert 的 transformer block 中把 FFN 替换为 spa
    - Cobot Magic-ARX X5：Stove cleaning。
 
 长程任务同时评估 in-domain（ID）和 out-of-distribution（OOD）。OOD 设置包括初始机器人位置前后左右 ±10 cm 扰动；冰箱分类任务还替换 unseen object categories。每个 task-setting 评估 15 次。
+
+从数据划分角度看，这里的训练数据和评估数据要分开理解：预训练用的是 60,000 h robot + ego corpus；GM-100 是 9 个双臂任务的 mixed-training generalist 评估；长程任务是两个真实机器人平台上的 in-domain/OOD 评估。论文没有给出完整 train/test episode 数，也没有报告预训练数据与 GM-100/长程任务 demonstration 是否存在平台级或场景级重叠，因此只能把结果视为系统级部署评估，而不是严格意义上的 held-out dataset 泛化证明。
 
 ### 4.2 主要结果
 
@@ -232,6 +281,8 @@ L2 平均成功率 55.0，高于 L1 的 46.4。作者认为多数 relQpos 是零
 
 5. 模块贡献耦合。数据规模、动作空间、MoE、dual-query distillation 都在变，虽然有部分消融，但很难完全拆清每个模块对最终 benchmark 的独立贡献。
 
+6. 关键训练维度披露还不够。论文给了 55 维 action/state schema、policy frequency、数据过滤规则，但没有报告图像分辨率、视觉 token 数、language max length、action chunk size、batch mixture ratio、各数据源采样权重等细节。对复现 VLA 训练来说，这些往往和模型结构一样关键。
+
 后续值得关注：
 
 - 更系统的跨平台 action representation 选择机制；
@@ -247,7 +298,7 @@ L2 平均成功率 55.0，高于 L1 的 46.4。作者认为多数 relQpos 是零
 
 2. **为什么这么做？**
 
-因为真实机器人不是单一双臂末端控制器。它有头、腰、底盘、手，有多源异构数据，也有长程任务的未来后果。单纯扩大模型或加 benchmark 分数不够；需要把数据、动作接口和预测式表征一起对齐到部署需求。
+因为真实机器人不是单一双臂末端控制器。它有头、腰、底盘、手，有多源异构数据，也有长程任务的未来后果。单纯扩大模型或加 benchmark 分数不够；需要先把 raw state/action/image 通过 robot config 映射到统一 feature space，再用动作归一化、padding 语义和 future-query supervision 把数据、动作接口和预测式表征一起对齐到部署需求。
 
 3. **什么证据最有说服力？**
 

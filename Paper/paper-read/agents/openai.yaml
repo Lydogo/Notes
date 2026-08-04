@@ -1,4 +1,4 @@
 interface:
   display_name: "Paper Read"
-  short_description: "按本地论文笔记风格精读论文并生成结构化中文研究笔记"
-  default_prompt: "Use $paper-read to read this robotics/VLA paper and produce a structured Chinese note."
+  short_description: "精读 VLA/机器人论文，突出数据处理与维度追踪"
+  default_prompt: "Use $paper-read to read this robotics/VLA paper and produce a Chinese note with detailed data usage, preprocessing, and dimension tracking."
