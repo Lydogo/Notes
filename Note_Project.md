@@ -1182,7 +1182,127 @@ inputs 做正向（数据集 → 模型），outputs 做逆向（模型 → 真�
   - 先在「Midtrain ckpt + 10–50 demo 遥操数据」的 few-shot 设定下对比 full fine-tune vs PriorVLA-style 适配的 OOD 成功率，作为最便宜的可行性验证。
   - 推理多一次 PE forward 是已知成本，先用 chunked control 摊薄，后续再考虑 PE 蒸馏。
 
+## 魔法原子工作总结-VLA算法工程师-magicvla预训练方向
 
+### 1. MagicVLA base 预训练架构设计
+
+MagicVLA 的整体设计是把“场景理解”和“连续动作生成”拆成两个相互协作但职责不同的模块：Qwen3.5-2B 负责视觉、语言和机器人状态的统一表征，action expert 负责根据场景条件生成连续动作。这样可以复用成熟的 VLM 先验，同时避免把连续动作直接离散成语言 token。
+
+#### 1.1 总体结构
+
+```text
+多相机图像 + task 文本 + robot state
+        ↓
+Qwen3.5-2B VLM：视觉/语言/状态前缀
+        ↓ 只在 full attention 层交互
+Qwen3.5-style action expert：动作 chunk + flow time
+        ↓
+连续 flow matching
+        ↓
+未来动作 chunk
+```
+
+- **VLM**：使用 Qwen3.5-2B，hidden size 2048，24 层。图像经过 Qwen 原生视觉编码器进入多模态 prefix，task 作为语言条件，robot state 默认通过 state embedding 作为连续 token 加入 prefix。
+- **Action expert**：24 层、hidden size 1024、SwiGLU intermediate size 3072，约 460M 参数。它不使用词表，而是直接处理连续 action query。
+- **混合注意力**：每 4 层为一个周期，前 3 层使用 Gated DeltaNet，最后 1 层使用 full attention，共 6 个周期。DeltaNet 层分别处理 VLM 和 action expert；在 full attention 层，action query 可以读取 VLM causal prefix 和整个 action chunk，VLM query 不读取 action token。
+- **动作输出**：默认是 14D 双臂动作，预测 16 步 action chunk。动作先按数据源统计做归一化，再用 flow matching 从噪声状态还原目标动作。
+
+#### 1.2 训练目标与数据路由
+
+flow matching 的训练样本是归一化后的 action chunk。对真实动作 `a1` 和噪声 `a0` 构造中间状态，根据采样的 flow time 预测从噪声到真实动作的 velocity。flow time 从 `Beta(1.5, 1.0)` 分布采样，再限制到 `[0.001, 0.999]`，让训练更多关注接近真实动作的区域。
+
+训练框架采用 model-owned contract：data backend 只负责读取和切分数据，模型自己的 processor 负责 state prompt、图像处理、归一化和 batch 解释，模型 `forward` 返回统一的 `ModelForwardOutput`，distributed trainer 负责 DDP/FSDP、优化器、scheduler、验证和 checkpoint。多数据源在 batch 级交错，保持每个 source 的 schema 和 normalization 独立。
+
+base 可以有两种训练模式：
+
+- **action expert-only**：冻结 Qwen 视觉/语言主干，主要训练 action expert，适合先建立动作生成能力。
+- **full/co-training**：机器人 batch 使用 flow matching；VLM batch 使用 Qwen next-token CE。可选 FAST action token 和 knowledge insulation：flow expert 读取 detached 的 VLM prefix，避免动作 loss 直接改写 VLM 的通用知识。
+
+当前 base 有意保持简单：没有 future-video reader、foresight token、WAN/VAE 分支或视频重建 loss。state 既可以作为 prompt 条件，也可以通过 additive condition 注入 action embedding，保证视觉语言条件与 proprioception 条件都能参与动作生成。
+
+### 2. Hy-UMI 数据处理 pipeline
+
+`pretrain_data_pipeline` 的设计目标是把不同来源的机器人数据先转换成统一的 episode/frame 结构，再写成 MagicVLA 可以直接读取的 LeRobot v2.1 数据集。pipeline 将 source reader、transform 和 target writer 分开，新增数据源时只需要实现对应 reader 和 feature schema，不修改公共写盘逻辑。
+
+```text
+MCAP source
+  → RealOmin UMI reader
+  → 时间对齐/插值/坐标变换
+  → canonical 80D state/action + mask
+  → LeRobot v2.1 writer
+  → parquet + metadata + MP4
+```
+
+#### 2.1 UMI 原始数据读取
+
+每个 MCAP episode 包含两台 UMI 设备 `robot0/robot1`，每台设备读取：
+
+- 腕部相机 H.264 compressed stream；
+- `camera_info` 中的相机外参 `T_b_c`；
+- `vio/eef_pose` 末端位姿；
+- `magnetic_encoder` 夹爪宽度。
+
+相机原始帧率是 30 FPS。reader 先检查两路视频是否存在 H.264 IDR 帧，找到两路时间范围的交集，并选择时间接近的 GOP 起点。随后取两路视频的共同长度，按两路时间戳平均构造统一 timeline，避免两只手的图像和动作错位。没有共同时间段、缺少 IDR 或有效帧数少于 2 的 episode 会被跳过。
+
+#### 2.2 坐标、插值和状态构造
+
+pipeline 使用 `robot0` 的初始 EEF pose 与相机外参建立 episode reference frame，把两只手的 VIO pose 都转换到同一个相对坐标系。pose 在统一 timeline 上用位置线性插值、旋转 SLERP 插值；夹爪宽度使用线性插值。插值间隔超过配置的 `max_interp_gap_ms` 时，该字段标记为 invalid，而不是填入不可信值。
+
+canonical 80D 布局为：
+
+| 区域 | 维度 | 内容 |
+|---|---:|---|
+| 左臂 | 0:32 | 7D joint、9D EEF、1D gripper、15D dex hand |
+| 右臂 | 32:64 | 7D joint、9D EEF、1D gripper、15D dex hand |
+| 底盘 | 64:70 | linear velocity 3D、angular velocity 3D |
+| 保留位 | 70:80 | reserved |
+
+当前 RealOmin UMI 转换只填充双手 EEF 和 gripper：每只手为 `xyz 3D + rotation 6D + gripper 1D`，因此有效数据为双手 20D，放入 canonical 80D 对应槽位，其余维度保持 0 并关闭 mask。
+
+- `observation.state`：当前帧的 EEF 绝对位置、6D rotation 和 gripper。
+- `action`：下一帧相对当前帧的 `xyz delta`、相对旋转的 axis-angle 3D 和下一帧 gripper absolute。
+- `observation.state.mask/action.mask`：逐维标记数据是否有效，masked 维度必须保持为 0。
+- rotation state 使用 6D 表示，action rotation 使用 `R_future @ R_current.T` 的 SO(3) log/axis-angle，避免直接对四元数做欧氏差分。
+- gripper 将宽度从 `[closed_width_m, open_width_m]` 归一化为 `[1, 0]`，即闭合值为 1、打开值为 0。
+
+每个输出 frame 还保留 `timestamp` 和 `frame_index`。episode task 名称由源目录生成，source metadata 保存原始/对齐帧数、裁剪范围、pose/gripper 有效率和相机最大时间偏差，便于后续排查数据质量。
+
+#### 2.3 LeRobot 输出与数据质量控制
+
+writer 将 episode 写成 LeRobot v2.1：帧数据进入 chunked parquet，视频写入对应 camera key 的 MP4，同时生成 `tasks.jsonl`、`episodes.jsonl`、`episodes_stats.jsonl` 和 mask stats。写盘支持 media worker；大规模转换时可以用 stream/batch writer 和 resume checkpoint，避免一次性把所有 episode 放进内存。
+
+配置要求 source 与 target 都使用 30 FPS，输出视频默认 1600×1300、H.264、无音频。pipeline 本身不把 invalid 字段强行插值为有效动作，而是保留 mask，后续 MagicVLA 数据层根据 source-specific norm stats 和 action mask 进行归一化与 loss masking。
+
+### 3. MagicVLA-base 短时视觉 memory 架构
+
+memory 方案的目标是让 base policy 使用当前帧之前的视觉历史，同时不改变原有 action expert 接口。它采用显式 history sample，而不是在模型内部维护 episode buffer：每个训练样本携带固定长度的历史帧，推理侧也按相同格式构造输入。
+
+#### 3.1 输入和数据契约
+
+当前设计使用 3 路相机、每路 6 帧、约 1 秒间隔，时间顺序为 oldest → current。episode 开头不足的历史帧使用第 0 帧补齐，但额外提供：
+
+- `history_valid [K]`：该位置是否为真实历史帧；
+- `history_dt [K]`：相对当前帧的时间差；
+- `memory_sequence_group_ids`：让同一个样本的多路相机共享 history mask。
+
+历史只在当前 episode 内采样，不跨 episode，也不读取未来帧。当前 state 仍只取最后一帧，过去 state 不进入 memory token；action target 仍然从当前 anchor 开始预测。
+
+#### 3.2 视觉塔中的历史注入
+
+每张 256×256 图像经过 Qwen processor 后约为 256 个视觉 patch，视觉 hidden size 为 1024。多相机、多历史帧先按 `sample → camera → oldest-to-current` 展平，进入 Qwen vision blocks。当前实现只在前半段视觉层保留历史，之后丢弃过去帧，只保留每路相机的 current frame，因此语言侧 token 数不随历史长度增加。
+
+memory temporal branch 插入 vision block 的指定位置，在同一 camera/sample 和同一 spatial patch 上沿时间做 attention，不跨相机、不混合不同空间位置。时间编码使用 `history_dt`，causal/valid mask 保证当前帧只能读取过去有效帧。这样历史信息通过视觉塔融合，最终仍由当前帧对应的视觉 token 进入 VLM prefix，action expert 不需要知道 memory 的内部实现。
+
+当前 v1 的配置要点是 temporal block `[3, 7, 11, 15, 19]`，在 block 20 后丢弃过去帧；每个有效相机最终经过 spatial merger 输出 64 个语言侧视觉 token。memory 分支使用 zero-gated residual 初始化，加载无 memory 的 base checkpoint 时先保持 current-only 行为，再逐步学习历史增量。
+
+#### 3.3 设计取舍
+
+- **固定窗口**：6 帧历史控制显存和视觉塔计算量；窗口外的长期信息不由当前模块负责。
+- **历史 dropout**：训练时让同一 sample 的多相机共享 mask，避免模型只依赖某一路相机的历史，并保留 current-only 能力。
+- **只改视觉侧**：不改变 action chunk、flow matching 或 action expert 结构，便于从 base checkpoint warm start 和做单变量 ablation。
+- **不把重复 padding 当真实历史**：`history_valid` 和 `history_dt` 是必要的数据契约，否则 episode 开头的重复图像会被错误解释为稳定运动。
+
+这个方案本质上是短时视觉记忆，不是跨 episode 的 persistent memory。它能补充遮挡、运动趋势和当前帧歧义，但无法解决长时任务状态、事件摘要或外部记忆检索问题。
 
 # 三、面试复盘
 
