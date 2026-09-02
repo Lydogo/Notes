@@ -1184,100 +1184,239 @@ inputs 做正向（数据集 → 模型），outputs 做逆向（模型 → 真�
 
 ## 魔法原子工作总结-VLA算法工程师-magicvla预训练方向
 
-### 1. MagicVLA base 预训练架构设计
+> 用途：面试复习。重点讲清本人做了什么、输入输出是什么、关键技术选择及原因，而不是罗列代码模块。
 
-MagicVLA 的整体设计是把“场景理解”和“连续动作生成”拆成两个相互协作但职责不同的模块：Qwen3.5-2B 负责视觉、语言和机器人状态的统一表征，action expert 负责根据场景条件生成连续动作。这样可以复用成熟的 VLM 先验，同时避免把连续动作直接离散成语言 token。
-
-#### 1.1 总体结构
+### 项目总框架
 
 ```text
-多相机图像 + task 文本 + robot state
-        ↓
-Qwen3.5-2B VLM：视觉/语言/状态前缀
-        ↓ 只在 full attention 层交互
-Qwen3.5-style action expert：动作 chunk + flow time
-        ↓
-连续 flow matching
-        ↓
-未来动作 chunk
+数据处理
+  ├─ Ego 数据
+  ├─ 混元开源 UMI 数据（当前主要负责）
+  ├─ 仿真数据
+  └─ 真机数据
+        ↓ 统一数据格式 / action 与 state 表示 / 质量控制
+
+MagicVLA-base pretrain
+  ├─ VLM backbone
+  ├─ action expert
+  ├─ 多模态输入与 action chunk 输出
+  ├─ flow matching / 其他监督
+  └─ 多源数据路由与训练框架
+        ↓ base checkpoint
+
+后训练：模型能力提升
+  ├─ memory 方向
+  ├─ RoboMME 方法整理与接入
+  ├─ DM05 方法整理与接入
+  └─ 长时任务、遮挡、历史信息和 OOD 能力评估
 ```
 
-- **VLM**：使用 Qwen3.5-2B，hidden size 2048，24 层。图像经过 Qwen 原生视觉编码器进入多模态 prefix，task 作为语言条件，robot state 默认通过 state embedding 作为连续 token 加入 prefix。
-- **Action expert**：24 层、hidden size 1024、SwiGLU intermediate size 3072，约 460M 参数。它不使用词表，而是直接处理连续 action query。
-- **混合注意力**：每 4 层为一个周期，前 3 层使用 Gated DeltaNet，最后 1 层使用 full attention，共 6 个周期。DeltaNet 层分别处理 VLM 和 action expert；在 full attention 层，action query 可以读取 VLM causal prefix 和整个 action chunk，VLM query 不读取 action token。
-- **动作输出**：默认是 14D 双臂动作，预测 16 步 action chunk。动作先按数据源统计做归一化，再用 flow matching 从噪声状态还原目标动作。
+这三块的关系是：数据处理统一异构数据，base pretrain 学习通用 VLA 先验，后训练补强历史建模与复杂任务能力。
 
-#### 1.2 训练目标与数据路由
+### 1. 数据处理与预训练数据
 
-flow matching 的训练样本是归一化后的 action chunk。对真实动作 `a1` 和噪声 `a0` 构造中间状态，根据采样的 flow time 预测从噪声到真实动作的 velocity。flow time 从 `Beta(1.5, 1.0)` 分布采样，再限制到 `[0.001, 0.999]`，让训练更多关注接近真实动作的区域。
+**一句话回答：** 我们把第一视角人手、Hy-UMI、真机和仿真数据统一为 LeRobot v2.1 的三相机、32D state/action、逐维 mask 契约；我主要负责 Hy-UMI 的 `cam_high` 无标定相机参数估计，以及将 UMI 双手 EEF 轨迹投影为 ARX5 双臂 joint 标签。
 
-训练框架采用 model-owned contract：data backend 只负责读取和切分数据，模型自己的 processor 负责 state prompt、图像处理、归一化和 batch 解释，模型 `forward` 返回统一的 `ModelForwardOutput`，distributed trainer 负责 DDP/FSDP、优化器、scheduler、验证和 checkpoint。多数据源在 batch 级交错，保持每个 source 的 schema 和 normalization 独立。
+#### 1.1 预训练数据构成
 
-base 可以有两种训练模式：
+当前 base 训练把 8 个机器人数据源按样本量混合为一个 robotics source，再以 robotics:EO VLM-SFT = 9:1 按 batch 交错。机器人数据使用行为克隆/flow matching，EO 提供视觉语言监督。
 
-- **action expert-only**：冻结 Qwen 视觉/语言主干，主要训练 action expert，适合先建立动作生成能力。
-- **full/co-training**：机器人 batch 使用 flow matching；VLM batch 使用 Qwen next-token CE。可选 FAST action token 和 knowledge insulation：flow expert 读取 detached 的 VLM prefix，避免动作 loss 直接改写 VLM 的通用知识。
+| 类别 | 数据源 | 机器人/相机特点 | 作用 |
+|---|---|---|---|
+| Ego | EgoDex | 人手第一视角，仅 `cam_high` | 学习第一视角操作和手部运动先验 |
+| UMI | Hy-Embodied UMI table_000/001 | 双手第一视角，`cam_high` + 双 wrist | 大规模人类示教，retarget 为 ARX5 |
+| 真机 | RoboDojo real：ARX X5、PiPER、PiPER-X | 三相机、双臂 | 对齐真实机器人动力学和关节控制 |
+| 仿真 | RoboTwin2.0、RoboDojo sim | 三相机、跨机器人/任务 | 扩展任务、场景和轨迹覆盖 |
+| 真机 | Galaxea R1 Lite | head + 双 wrist，读取时映射为统一相机 key | 增加 embodiment 多样性 |
+| VLM | EO Robo2VLM SFT | 图文/视频问答 | 保留和增强视觉语言能力 |
 
-当前 base 有意保持简单：没有 future-video reader、foresight token、WAN/VAE 分支或视频重建 loss。state 既可以作为 prompt 条件，也可以通过 additive condition 注入 action embedding，保证视觉语言条件与 proprioception 条件都能参与动作生成。
+机器人数据在 source 内按物理样本量 `concat_shuffle`，不人为把小数据集重复到和大数据集一样多；每个 source 独立做 normalization，不能将人手、ARX5 和 PiPER 的统计量混用。
 
-### 2. Hy-UMI 数据处理 pipeline
-
-`pretrain_data_pipeline` 的设计目标是把不同来源的机器人数据先转换成统一的 episode/frame 结构，再写成 MagicVLA 可以直接读取的 LeRobot v2.1 数据集。pipeline 将 source reader、transform 和 target writer 分开，新增数据源时只需要实现对应 reader 和 feature schema，不修改公共写盘逻辑。
+#### 1.2 统一 32D 数据契约
 
 ```text
-MCAP source
-  → RealOmin UMI reader
-  → 时间对齐/插值/坐标变换
-  → canonical 80D state/action + mask
-  → LeRobot v2.1 writer
-  → parquet + metadata + MP4
+state[t]：当前机器人状态
+action[t:t+50]：未来 50 步动作 chunk
+dim_mask：该维度是否真实存在并参与输入/loss
+camera_valid：当前样本实际具备哪些相机
 ```
 
-#### 2.1 UMI 原始数据读取
-
-每个 MCAP episode 包含两台 UMI 设备 `robot0/robot1`，每台设备读取：
-
-- 腕部相机 H.264 compressed stream；
-- `camera_info` 中的相机外参 `T_b_c`；
-- `vio/eef_pose` 末端位姿；
-- `magnetic_encoder` 夹爪宽度。
-
-相机原始帧率是 30 FPS。reader 先检查两路视频是否存在 H.264 IDR 帧，找到两路时间范围的交集，并选择时间接近的 GOP 起点。随后取两路视频的共同长度，按两路时间戳平均构造统一 timeline，避免两只手的图像和动作错位。没有共同时间段、缺少 IDR 或有效帧数少于 2 的 episode 会被跳过。
-
-#### 2.2 坐标、插值和状态构造
-
-pipeline 使用 `robot0` 的初始 EEF pose 与相机外参建立 episode reference frame，把两只手的 VIO pose 都转换到同一个相对坐标系。pose 在统一 timeline 上用位置线性插值、旋转 SLERP 插值；夹爪宽度使用线性插值。插值间隔超过配置的 `max_interp_gap_ms` 时，该字段标记为 invalid，而不是填入不可信值。
-
-canonical 80D 布局为：
-
-| 区域 | 维度 | 内容 |
+| 索引 | 维度 | 语义 |
 |---|---:|---|
-| 左臂 | 0:32 | 7D joint、9D EEF、1D gripper、15D dex hand |
-| 右臂 | 32:64 | 7D joint、9D EEF、1D gripper、15D dex hand |
-| 底盘 | 64:70 | linear velocity 3D、angular velocity 3D |
-| 保留位 | 70:80 | reserved |
+| `0:6` | 6 | 左臂 joint |
+| `6` | 1 | 左 gripper |
+| `7:13` | 6 | 右臂 joint |
+| `13` | 1 | 右 gripper |
+| `14:17` | 3 | 左 EEF 在 `cam_high` 坐标系的 xyz |
+| `17:23` | 6 | 左 EEF rotation-6D |
+| `23:26` | 3 | 右 EEF 在 `cam_high` 坐标系的 xyz |
+| `26:32` | 6 | 右 EEF rotation-6D |
 
-当前 RealOmin UMI 转换只填充双手 EEF 和 gripper：每只手为 `xyz 3D + rotation 6D + gripper 1D`，因此有效数据为双手 20D，放入 canonical 80D 对应槽位，其余维度保持 0 并关闭 mask。
+设计为 32D 的原因：
 
-- `observation.state`：当前帧的 EEF 绝对位置、6D rotation 和 gripper。
-- `action`：下一帧相对当前帧的 `xyz delta`、相对旋转的 axis-angle 3D 和下一帧 gripper absolute。
-- `observation.state.mask/action.mask`：逐维标记数据是否有效，masked 维度必须保持为 0。
-- rotation state 使用 6D 表示，action rotation 使用 `R_future @ R_current.T` 的 SO(3) log/axis-angle，避免直接对四元数做欧氏差分。
-- gripper 将宽度从 `[closed_width_m, open_width_m]` 归一化为 `[1, 0]`，即闭合值为 1、打开值为 0。
+- **统一模型接口**：不同机器人、joint 控制和 EEF 控制可共用同一个 action expert、checkpoint 和 action tokenizer。
+- **joint 与 EEF 互补**：前 14D 是可直接执行的双臂控制量；后 18D 把动作放到图像观察坐标系，提供更强的视觉几何对应。
+- **mask 而非假零值**：Hy-UMI 的兼容版本只有前 14D、部分源没有 EEF 或缺少 wrist 图像，均右侧补零并关闭相应 mask。mask 同时进入 state embedding 和 flow loss，避免把“未测量的 0”误当成“中位姿态/真实动作”。
+- **统一旋转语义**：EEF 使用连续 rotation-6D；训练中的 `chunk_delta` 对平移/joint 构造相对量，gripper 保持绝对状态，rotation group 用合法旋转组合处理，避免直接相减四元数。
 
-每个输出 frame 还保留 `timestamp` 和 `frame_index`。episode task 名称由源目录生成，source metadata 保存原始/对齐帧数、裁剪范围、pose/gripper 有效率和相机最大时间偏差，便于后续排查数据质量。
+#### 1.3 总体 pipeline
 
-#### 2.3 LeRobot 输出与数据质量控制
+`/home/user/workspace/pretrain_data_pipeline` 是数据处理仓库。每种 source 只实现 reader，公共 transforms 负责质量检查、坐标处理、retarget 和写盘：
 
-writer 将 episode 写成 LeRobot v2.1：帧数据进入 chunked parquet，视频写入对应 camera key 的 MP4，同时生成 `tasks.jsonl`、`episodes.jsonl`、`episodes_stats.jsonl` 和 mask stats。写盘支持 media worker；大规模转换时可以用 stream/batch writer 和 resume checkpoint，避免一次性把所有 episode 放进内存。
+```text
+Lance / HDF5 / 原始 LeRobot
+  → source reader：episode、图像、原始 state/action
+  → quality check / 异常修复
+  → 坐标系变换、retarget、next-step action
+  → 32D pack + state_mask/action_mask
+  → LeRobot v2.1：Parquet + 三路 MP4 + meta + norm statistics
+```
 
-配置要求 source 与 target 都使用 30 FPS，输出视频默认 1600×1300、H.264、无音频。pipeline 本身不把 invalid 字段强行插值为有效动作，而是保留 mask，后续 MagicVLA 数据层根据 source-specific norm stats 和 action mask 进行归一化与 loss masking。
+训练 reader 再统一相机 key 为 `cam_high / cam_left_wrist / cam_right_wrist`；缺失相机使用 `camera_valid` 屏蔽，而不把零图像作为真实观测。
 
-### 3. MagicVLA-base 短时视觉 memory 架构
+#### 1.4 Hy-UMI 原始数据与清洗
+
+Hy-UMI 原始数据是 Lance-backed LeRobot v3，`table_000` 和 `table_001` 各约 1.16 万 episode、约 1,079 万帧，原始 30 FPS。每帧包含三路 `424x240` RGB、16D 双手跟踪状态和 2D gripper command：
+
+```text
+raw state = [L_xyz(3), L_quat_xyzw(4), L_gripper(1),
+             R_xyz(3), R_quat_xyzw(4), R_gripper(1)]
+raw action = [L_gripper_command, R_gripper_command]
+```
+
+处理时将四元数从 `xyzw` 统一为 `wxyz`；夹爪把原始 `0 mm=open, 90 mm=closed` 转为 `1=open, 0=closed`。测得 gripper state 与下一步 gripper command 分开保存，不能相互替代。
+
+质量控制先检查三路图像描述符、夹爪范围、EEF 可见性、位置异常、速度/角速度突变和静止段；只对异常 EEF 轨迹插值修复，再进入 IK。视频、EEF 与 action 共用同一帧索引，正式生产配置保持 30 FPS、原始 `424x240` 分辨率。
+
+#### 1.5 本人工作一：`cam_high` 无标定相机参数估计
+
+Hy-UMI 没有官方 `cam_high` 内外参，且每帧可稳定利用的几何对应只有左右两个 UMI 设备。目标不是逐 episode 盲拟合，而是估计 table 级共享参数，并按 session/batch 做小范围 refinement。
+
+1. 从多帧灰度图取时间中值作为背景；以亮桌面区域为搜索范围。
+2. 用 `max(|I-background|, background-I)` 同时保留运动和暗色证据，形态学去噪后取两个连通域；左右手尝试两种匹配，选总重投影误差更小的一种。
+3. 以针孔模型优化 15 个变量：相机旋转/平移 6D、共享焦距 1D、主点 2D、左右 device offset 各 3D。offset 解决 3D 跟踪原点和图像暗块质心并非同一点的问题。
+4. 优化目标是所有有效对应的 pixel residual 的最小 60% trimmed mean，降低遮挡、设备重叠和 blob 误检的影响；从经过验证的 seed 多次 Nelder-Mead 优化，而不是随机初始化。
+5. 标定输出 `T_W_C`（`cam_high -> UMI world`）和 K。训练 EEF 通过 `$T_C^E=(T_W^C)^{-1}T_W^E$` 转到相机系；**device offset 只用于标定，不写入 EEF 标签**。
+
+table_000 的全局标定为 `fx=fy=235.7 px`，重投影中位误差约 41 px、held-out 约 37 px。由于 2D blob 是“手+设备”的质心而非动捕原点，存在约 15-20 px 的误差地板；验收以跨任务 overlay 为主，数值 residual 只作汇总。头戴相机跨 session 会变化，因此后续以 table 全局 K/offset 为先验，session 主要 refine rotation。
+
+#### 1.6 本人工作二：UMI EEF 到 ARX5 joint 投影
+
+目标是把人手 EEF 示教变成可由 ARX5 执行的 14D 双臂标签，而不是把人手坐标直接当成 robot joint。
+
+```text
+UMI EEF pose
+  → 统一到 UMI world/task frame
+  → 手部局部轴对齐 ARX5 TCP
+  → 固定虚拟 ARX5 base
+  → 双臂 DLS IK + joint limit + step limit + collision check
+  → [L_joint1..6, L_gripper, R_joint1..6, R_gripper]
+```
+
+- UMI world 和 ARX5 task frame 都采用 `+X forward, +Y left, +Z up`，所以 world 到 task 为 identity；但 UMI local hand axes 与 ARX5 TCP 不同，必须右乘固定 `hand_to_ee` 置换矩阵，否则姿态标签错误。
+- ARX5 base 不是相机外参。通过代表性 episode 搜索一套 `task_from_root`，以 IK 失败、碰撞、位置/姿态 residual 为主目标，并用双臂左右对称和朝向先验打破近似解；同一 session/batch 固定 base，避免跨 episode 的 joint 语义漂移。
+- 每臂使用 6-DoF URDF chain 的阻尼最小二乘 IK，限制单步 joint 变化 `0.12 rad`，并检查关节限位和双臂碰撞。table_000 小批量搜索得到 base 约为 `[0.107, 0, -0.704] m`、yaw 约 `-10 deg`；采样验证 128/128 IK 成功、0 碰撞。
+- joint state/action 使用 IK 得到的结果；相机系 EEF 标签保留 **送入 IK 的目标 EEF**，不再用 FK 回算覆盖，避免 URDF TCP 偏差和 IK residual 污染视觉几何监督。
+
+#### 1.7 面试回答要点
+
+- **你做了什么？** 负责 Hy-UMI 的无标定 `cam_high` 参数估计和 UMI EEF 到 ARX5 joint retarget，使人类第一视角示教可进入统一 32D 预训练。
+- **最大难点？** 两个 3D 点对应两个无标签图像 blob，焦距、位姿和设备偏置高度耦合；因此用跨 episode 共享参数、trimmed residual、显式左右匹配和 overlay 验收，而非逐帧/逐 episode 全参数拟合。
+- **为什么要 32D + mask？** 既保留 joint 的可执行性和 EEF 的视觉对齐，又让不同 embodiment 共用模型接口；mask 解决异构数据中“缺失维度”和“数值为零”不可区分的问题。
+
+### 2. MagicVLA-base pretrain 模型架构
+
+**一句话回答：** MagicVLA-base 用 Qwen3.5-2B 承担视觉语言理解，用一个 460M 的连续 action expert 生成 32D、50-step 动作 chunk；两者只在 Qwen 的 full-attention 层进行单向 joint attention，因此既复用 VLM 先验，又避免把连续控制离散成语言 token。
+
+#### 2.1 设计思路
+
+- **分工而非单塔硬做**：视觉、语言和任务理解已有强 Qwen 先验；动作是连续高频轨迹，直接预测 velocity 比量化为 token 更自然。于是 VLM 做条件前缀，action expert 做 flow matching。
+- **兼容 Qwen3.5 的混合骨干**：Qwen3.5 的 24 层按 `3 x Gated DeltaNet + 1 x full attention` 重复 6 次。线性注意力是递推结构，不能安全地把两种 token 直接拼接；所以仅在 6 个 full-attention 层融合，其余 18 层两支独立运行。
+- **异构 embodiment 可共训**：数据层统一为 32D，但不是强行假装每个机器人都有全部维度。state/action mask、相机有效位和 source-specific normalization 同时进入模型和 loss。
+- **保留通用视觉语言能力**：机器人 flow loss 不直接冲击 VLM；通过 knowledge insulation 隔离梯度，VLM 主要由 FAST action CE 和 EO VLM-SFT 的 next-token CE 更新。
+
+#### 2.2 模型结构与信息流
+
+```text
+cam_high + left/right wrist + task text + 32D state/mask
+                         ↓
+Qwen3.5-2B VLM prefix (24 layers, hidden 2048)
+                         ↓ 仅 6 个 full-attention 层提供 K/V
+32D noisy action[50] + flow time + state condition
+                         ↓
+Qwen3.5-style action expert (24 layers, hidden 1024, about 460M)
+                         ↓
+velocity[50, 32]  -- reverse flow --> future action chunk
+```
+
+| 模块 | 实现细节 | 作用 |
+|---|---|---|
+| 多模态 prefix | Qwen 原生图像编码；三相机 letterbox 到 `256x256`；文本为 task/embodiment 条件 | 形成场景与任务语义 |
+| state 条件 | `state(32) + state_dim_mask(32)` 经 MLP 投成 1 个连续 prefix token；同时以 additive condition 加到每个 action token | 避免把 32 个数字展开为约 294 个文本 token；显式区分缺失维度与归一化后的零值 |
+| action expert | 输入 `noisy_action[50,32]`，加 action position、flow-time embedding 和 state condition；24 层、width `1024`、SwiGLU `3072` | 直接建模连续 chunk，不依赖动作词表 |
+| Hybrid schedule | 18 个 Gated DeltaNet 层分别更新 VLM/action；6 个 full-attention 层共享 attention 计算 | 以较低成本让动作读取视觉语言上下文，并保持与 Qwen 预训练层型一致 |
+| output head | RMSNorm + linear，输出每个动作位置的 32D velocity | 供 flow matching 训练和 Euler 反演 |
+
+full-attention 中序列固定为 `[VLM prefix, action suffix]`，mask 是非对称的：
+
+| query \ key | VLM prefix | action suffix |
+|---|---|---|
+| VLM prefix | causal + valid | 禁止 |
+| action suffix | 全部有效 prefix | chunk 内双向 |
+
+因此 action 可以使用视觉语言条件和整个未来 chunk 的协同信息；VLM 永远看不到动作 target，不产生动作信息泄漏。两支 hidden size 虽为 `2048/1024`，但 full-attention 的 head 规格兼容，attention 后再分别走各自的 output projection。
+
+#### 2.3 32D 训练与推理契约
+
+训练机器人 batch 的目标是归一化后的 `action[50,32]`。采样 `$t\sim Beta(1.5,1.0)$` 并截断到 `[0.001,0.999]`，构造 `$x_t=(1-t)a+t\epsilon$`，模型预测 velocity `$\epsilon-a$`。loss 只在 `~action_is_pad & action_dim_mask` 的元素上计算，可选提高前几个可执行 horizon 的权重。
+
+- **chunk delta**：joint/平移使用相对当前 state 的 delta；gripper 保持绝对命令；两组 EEF rotation-6D 用 `$R_{target}R_{state}^{T}$` 组合，而非逐元素相减。
+- **共同训练**：8 个机器人 source 用 flow matching，EO VLM-SFT 用 Qwen CE；当前主配方为 robotics:EO=`9:1`。FAST 是辅助的动作 token CE，不参与部署时的动作生成。
+- **Knowledge insulation**：action expert 读取 detached VLM prefix，flow gradient 不更新 VLM；关闭 KI 时可做完全端到端共同优化。当前 8-source 配方开启 KI，VLM 通过 FAST/EO loss 更新。
+- **推理**：从 masked Gaussian noise 开始，默认 10 次 Euler reverse-flow。VLM prefix 与每个 full-attention 层的 K/V 对噪声步骤无关，先计算一次并缓存；每一步都重新施加 action mask，保证训练与推理都不会在不存在的 embodiment 维度上产生噪声或速度。
+- **部署闭环**：按 source 的 quantile stats 反归一化，再按 delta/rotation 规则还原到 action target。故 checkpoint 必须携带 normalization metadata，只有权重不能正确执行动作。
+
+#### 2.4 实际排障记录
+
+| 问题 | 根因 | 修复与防回归 |
+|---|---|---|
+| full fine-tune 第一次真实 forward 直接报 `AttributeError` | joint trunk 从 decoder layer 读取 `block_type`；Transformers 5.5.4 改名为 `layer_type`，而旧 fake test 恰好复制了错误假设 | 改从 checkpoint 的 `text_config.layer_types` 读取层调度，并在初始化校验 action expert 与 VLM 的 24 层 schedule 一致；测试模拟真实 layer 缺少该属性 |
+| 缺失维度被当作“中位姿态” | quantile normalization 后 `0` 是范围中点。旧逻辑把 masked state 清零后丢弃 mask，RoboTwin2 右 EEF 仅约 41.3% 帧有效 | 将 32D state mask 与 state 一起输入 MLP；action mask 同时控制 noise、flow loss 和每一轮推理更新 |
+| EEF rotation 的 delta 语义错误但 loss 不报错 | 旧实现直接相减 rotation-6D，结果不在 SO(3)，且同一手腕运动会随参考坐标变化 | 改为 `$R_{rel}=R_{target}R_{state}^{T}$` 后再转 rotation-6D；把 rotation 规则写入 norm-stats signature，拒绝复用旧统计量 |
+| 多卡训练有效随机性不足，resume 后更新几乎停滞 | 所有 rank 用同一全局 RNG，flow time/noise 完全相同；同时 optimizer load 把 bf16 参数对应的 fp32 master/moments 强转回 bf16 | rank-aware seed 保留数据 source 同步而区分模型随机数；resume 后显式恢复 fp32 optimizer state，并在关闭 autocast 的 fp32 delta-rule 路径测试 |
+| FAST 辅助目标和部署动作不一致 | episode 尾部 padding 被置零后仍送入 FAST tokenizer；归一化零值并非“静止”，生成了伪造的回中位动作 token | tokenizer 按 sample 截断/前向填充 invalid tail；flow 与 FAST 共享 pad 语义。checkpoint 保存并强制校验 per-source normalization/delta metadata |
+
+#### 2.5 面试回答要点
+
+- **为什么不直接让 VLM 输出动作 token？** 50 步 32D 轨迹是连续、强时序相关的控制量。flow expert 在连续空间生成更合适，FAST 只作为保护 VLM 表征的辅助监督。
+- **为什么只在部分层 joint attention？** Qwen 的 DeltaNet 是递推线性注意力，强行拼接会破坏其状态语义；full-attention 层支持标准 Q/K/V 融合，6 次交互已能把条件传给 action branch。
+- **最重要的工程原则？** 32D 不只是 padding shape；mask、归一化、delta 规则、checkpoint metadata 和推理反归一化必须是一套契约。否则训练 loss 正常，部署动作仍可能是错误的。
+
+### 3. 后训练：memory 方向
+
+后训练阶段主要用于提升 base 模型的历史建模、长时任务、遮挡恢复和复杂交互能力。当前先建立方法和实验的整理入口，具体方案以后续论文和代码阅读结果为准。
+
+| 方法/方向 | 关注问题 | 当前状态 |
+|---|---|---|
+| RoboMME | memory 能力评测、任务类型和 benchmark 设计 | 待补充论文分析与评测协议 |
+| DM05 | memory/后训练方法、训练数据和模型改动 | 待补充论文分析与实现方案 |
+| 短时视觉 memory | 当前帧结合固定历史帧，改善遮挡和局部歧义 | 已有初步架构记录，见下文 |
+
+后训练统一记录以下内容：
+
+- **能力目标**：短时历史、长时任务状态、子目标跟踪、遮挡下空间定位、跨任务泛化。
+- **输入输出变化**：是否新增 history token、memory token、检索结果或额外监督；action chunk 和 action space 是否保持不变。
+- **训练数据**：需要多少历史帧、是否使用同一 episode 的过去观测、是否需要事件/子目标标注、memory 数据与普通轨迹的混合比例。
+- **训练方式**：从 base checkpoint 如何初始化，冻结哪些模块，新增哪些参数，使用 imitation、memory prediction、contrastive 或其他 loss。
+- **评估方式**：RoboMME、DM05 相关 benchmark、长时任务、遮挡任务、current-only 对比、memory ablation 和真实机器人验证。
+
+RoboMME 与 DM05 的具体方法、数据处理和实验数字暂留待补充，不在当前框架阶段提前下结论。
+
+#### 3.1 短时视觉 memory 架构（已有技术记录）
 
 memory 方案的目标是让 base policy 使用当前帧之前的视觉历史，同时不改变原有 action expert 接口。它采用显式 history sample，而不是在模型内部维护 episode buffer：每个训练样本携带固定长度的历史帧，推理侧也按相同格式构造输入。
 
-#### 3.1 输入和数据契约
+##### 3.1.1 输入和数据契约
 
 当前设计使用 3 路相机、每路 6 帧、约 1 秒间隔，时间顺序为 oldest → current。episode 开头不足的历史帧使用第 0 帧补齐，但额外提供：
 
@@ -1287,7 +1426,7 @@ memory 方案的目标是让 base policy 使用当前帧之前的视觉历史，
 
 历史只在当前 episode 内采样，不跨 episode，也不读取未来帧。当前 state 仍只取最后一帧，过去 state 不进入 memory token；action target 仍然从当前 anchor 开始预测。
 
-#### 3.2 视觉塔中的历史注入
+##### 3.1.2 视觉塔中的历史注入
 
 每张 256×256 图像经过 Qwen processor 后约为 256 个视觉 patch，视觉 hidden size 为 1024。多相机、多历史帧先按 `sample → camera → oldest-to-current` 展平，进入 Qwen vision blocks。当前实现只在前半段视觉层保留历史，之后丢弃过去帧，只保留每路相机的 current frame，因此语言侧 token 数不随历史长度增加。
 
@@ -1295,7 +1434,7 @@ memory temporal branch 插入 vision block 的指定位置，在同一 camera/sa
 
 当前 v1 的配置要点是 temporal block `[3, 7, 11, 15, 19]`，在 block 20 后丢弃过去帧；每个有效相机最终经过 spatial merger 输出 64 个语言侧视觉 token。memory 分支使用 zero-gated residual 初始化，加载无 memory 的 base checkpoint 时先保持 current-only 行为，再逐步学习历史增量。
 
-#### 3.3 设计取舍
+##### 3.1.3 设计取舍
 
 - **固定窗口**：6 帧历史控制显存和视觉塔计算量；窗口外的长期信息不由当前模块负责。
 - **历史 dropout**：训练时让同一 sample 的多相机共享 mask，避免模型只依赖某一路相机的历史，并保留 current-only 能力。
