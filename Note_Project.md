@@ -1394,54 +1394,67 @@ full-attention 中序列固定为 `[VLM prefix, action suffix]`，mask 是非对
 
 ### 3. 后训练：memory 方向
 
-后训练阶段主要用于提升 base 模型的历史建模、长时任务、遮挡恢复和复杂交互能力。当前先建立方法和实验的整理入口，具体方案以后续论文和代码阅读结果为准。
+这一阶段的目标不是重新预训练 VLA，而是以 RoboDojo 轨迹为数据，对已有 base policy 做后训练 / SFT，让模型在动作预测时利用当前帧以前的视觉信息。实验中既有 Pi0.5，也有 MagicVLA / Hy-VLA 类基座的尝试；下文的脚本和源码路径以当前能核对到的 Pi0.5、Hy-VLA 实现为准。动作 chunk、动作空间和 flow-matching 监督原则上保持不变，主要比较的是“历史信息放在哪里、怎样压缩、怎样注入动作专家”。
 
-| 方法/方向 | 关注问题 | 当前状态 |
-|---|---|---|
-| RoboMME | memory 能力评测、任务类型和 benchmark 设计 | 待补充论文分析与评测协议 |
-| DM05 | memory/后训练方法、训练数据和模型改动 | 待补充论文分析与实现方案 |
-| 短时视觉 memory | 当前帧结合固定历史帧，改善遮挡和局部歧义 | 已有初步架构记录，见下文 |
+三个方向可以按下面的关系来理解：
 
-后训练统一记录以下内容：
+| 方向 | 历史信息进入模型的位置 | 主要机制 | 当前状态 |
+|---|---|---|---|
+| Hy-VLA-style-mem | 视觉编码器内部 | 6 帧视频输入 + 时空注意力 | 已完成代码和 RoboDojo 后训练尝试 |
+| RoboMME FrameSamp+Modul | action expert | 均匀采样 / 首帧特征 + cross-attention + RMSNorm 调制 | 已完成多组采样与 keyframe ablation |
+| DM05-style memory | VLM prefix | 稀疏长历史帧 + SigLIP pooling | 正在验证 |
 
-- **能力目标**：短时历史、长时任务状态、子目标跟踪、遮挡下空间定位、跨任务泛化。
-- **输入输出变化**：是否新增 history token、memory token、检索结果或额外监督；action chunk 和 action space 是否保持不变。
-- **训练数据**：需要多少历史帧、是否使用同一 episode 的过去观测、是否需要事件/子目标标注、memory 数据与普通轨迹的混合比例。
-- **训练方式**：从 base checkpoint 如何初始化，冻结哪些模块，新增哪些参数，使用 imitation、memory prediction、contrastive 或其他 loss。
-- **评估方式**：RoboMME、DM05 相关 benchmark、长时任务、遮挡任务、current-only 对比、memory ablation 和真实机器人验证。
+#### 3.1 Hy-VLA-style-mem：把历史帧作为短视频输入视觉塔
 
-RoboMME 与 DM05 的具体方法、数据处理和实验数字暂留待补充，不在当前框架阶段提前下结论。
+**一句话原理：** 不把过去帧简单拼成更多语言 token，而是把同一相机的历史图像组成一个短视频，在视觉编码器中先做时间建模，再把融合后的当前帧特征交给后面的 VLM 和 action expert。
 
-#### 3.1 短时视觉 memory 架构（已有技术记录）
+**数据和输入。** 每个 RoboDojo 样本从当前时刻所在 episode 内取一个固定长度的图像窗口。代码配置为 `img_history_size=6`、`img_history_interval=20`，顺序是 oldest → current；严格按代码口径，6 帧总数包含最后的当前帧，可以在面试中概括为“把过去约 6 个时间点的图像历史送入模型”。训练时可以在每个时间间隔对应的小区间内采样，评估时使用确定的历史索引；episode 开头不足的部分会落到第 0 帧，并用 mask 标识无效历史。历史只来自当前 episode，不读取未来帧。
 
-memory 方案的目标是让 base policy 使用当前帧之前的视觉历史，同时不改变原有 action expert 接口。它采用显式 history sample，而不是在模型内部维护 episode buffer：每个训练样本携带固定长度的历史帧，推理侧也按相同格式构造输入。
+**模型改动。** `Hy-Embodied-0.5-VLA` 对原视觉塔增加 video encoder 路径：输入从单帧 `(B,C,H,W)` 变为 `(B,K,C,H,W)`。在视觉 transformer 的部分 block 中插入 `SpaceTimeBlock`，先对同一空间 patch 沿时间做 causal attention，再做空间 attention，并加入时间 sinusoidal embedding；不同相机和不同空间位置不会互相混淆。经过指定层后只保留当前帧 token，历史信息已经在视觉塔内部汇入当前帧表示，因此下游 action expert 接口不需要改变。
 
-##### 3.1.1 输入和数据契约
+**为什么这样设计。** 视觉侧时空注意力适合捕捉遮挡前后的物体位置、运动方向和接触过程，同时通过“中间融合、末端只保留当前帧”控制 token 数和后续计算量。它的局限是窗口较短，主要解决短时动态和当前帧歧义，不负责跨 episode 的长期任务记忆；而且历史帧会直接增加视觉塔前段的计算和显存。
 
-当前设计使用 3 路相机、每路 6 帧、约 1 秒间隔，时间顺序为 oldest → current。episode 开头不足的历史帧使用第 0 帧补齐，但额外提供：
+**面试表述：** “我在 Hy-VLA 分支上做了 RoboDojo 后训练，把每个相机的当前帧和过去 5 个采样时刻组成 6 帧短视频，在视觉 encoder 的部分层加入时空 attention。时间 attention 使用 causal mask，保证当前只能看过去；后面丢弃历史 token，只保留当前帧的融合特征，所以不改 action expert 和动作输出接口。”
 
-- `history_valid [K]`：该位置是否为真实历史帧；
-- `history_dt [K]`：相对当前帧的时间差；
-- `memory_sequence_group_ids`：让同一个样本的多路相机共享 history mask。
+#### 3.2 RoboMME FrameSamp+Modul：离线特征采样，再调制 action expert
 
-历史只在当前 episode 内采样，不跨 episode，也不读取未来帧。当前 state 仍只取最后一帧，过去 state 不进入 memory token；action target 仍然从当前 anchor 开始预测。
+**一句话原理：** 先用冻结的视觉塔离线提取整条 episode 的 `cam_high` 特征，训练样本只取其中一部分历史帧；再把历史视觉特征和时空位置编码投影成 memory token，让 action token cross-attend 到 memory，并用 memory 产生的 scale / shift 调制 action expert 的 RMSNorm。
 
-##### 3.1.2 视觉塔中的历史注入
+**历史采样。** `frame_memory.py` 中的 `even_sampling_indices()` 在当前帧之前的 episode 前缀上均匀取样，并尽量包含首帧和当前帧；`framesamp_budget` 固定 memory token 总预算，未使用位置右侧 padding 并由 `static_mask` 屏蔽。标准 `framesamp_modul` 配置通常是 `budget=512`、每帧 16 个 token，也就是最多约 32 个采样帧；历史视觉特征保存在 `framesamp_features` 中，训练时不再重复跑历史图像的视觉 encoder。当前三路相机仍走 Pi0.5 的普通输入路径，memory 主要来自 top-head / `cam_high`。
 
-每张 256×256 图像经过 Qwen processor 后约为 256 个视觉 patch，视觉 hidden size 为 1024。多相机、多历史帧先按 `sample → camera → oldest-to-current` 展平，进入 Qwen vision blocks。当前实现只在前半段视觉层保留历史，之后丢弃过去帧，只保留每路相机的 current frame，因此语言侧 token 数不随历史长度增加。
+在此基础上做了两类 ablation：
 
-memory temporal branch 插入 vision block 的指定位置，在同一 camera/sample 和同一 spatial patch 上沿时间做 attention，不跨相机、不混合不同空间位置。时间编码使用 `history_dt`，causal/valid mask 保证当前帧只能读取过去有效帧。这样历史信息通过视觉塔融合，最终仍由当前帧对应的视觉 token 进入 VLM prefix，action expert 不需要知道 memory 的内部实现。
+- **加入首帧：** 使用 `framesamp_sampling_strategy="first_frame"`，只提供 episode 的第 0 帧。`train_robodojo_mem_keyframe_256.sh` 对应的 `pi05_robodojo_mem_keyframe_256_v2` 配置使用 256 个 token、每帧 256 个 token，即用一张未做空间 pooling 的首帧作为 memory；它重点验证“任务初始场景 / 初始物体信息”是否比长历史更有用。
+- **提高 keyframe 采样比例：** 在数据采样层读取 `is_key_frame`，通过 `keyframe_mode="boost"` 提高关键帧权重，同时仍保留普通帧，避免模型只看到关键帧。不同实验中尝试过 `keyframe_boost=2` 和 v2 中的 `15`；这改变的是训练样本分布，不改变单个样本的动作监督。
 
-当前 v1 的配置要点是 temporal block `[3, 7, 11, 15, 19]`，在 block 20 后丢弃过去帧；每个有效相机最终经过 spatial merger 输出 64 个语言侧视觉 token。memory 分支使用 zero-gated residual 初始化，加载无 memory 的 base checkpoint 时先保持 current-only 行为，再逐步学习历史增量。
+**模型注入。** 每个采样帧的视觉 embedding 与 3D sinusoidal temporal/spatial position embedding 拼接，再经过 `PerceptualMemory` 投影到 action expert 的 hidden size。Gemma action 分支在 transformer block 中对 memory 做 cross-attention；得到的 memory condition 继续经过 `MemoryRMSNorm` 生成 scale 和 shift，调制 action expert 的 FFN 输入。也就是说，历史不直接塞进 VLM 的主 prefix，而是作为 action expert 生成动作时的额外条件；`action_horizon`、动作维度和 flow-matching loss 都不变。
 
-##### 3.1.3 设计取舍
+**优缺点。** 这种方式把历史视觉计算离线化，并用固定 token budget 控制训练成本；memory 与动作分支直接交互，适合需要根据过去观测选择动作的任务。代价是需要维护 episode 级 feature cache、采样索引、位置编码和 padding mask 的一致性；如果只提高 keyframe 权重，也可能损失普通过渡状态，因此必须与均匀采样和 current-only 做对比。
 
-- **固定窗口**：6 帧历史控制显存和视觉塔计算量；窗口外的长期信息不由当前模块负责。
-- **历史 dropout**：训练时让同一 sample 的多相机共享 mask，避免模型只依赖某一路相机的历史，并保留 current-only 能力。
-- **只改视觉侧**：不改变 action chunk、flow matching 或 action expert 结构，便于从 base checkpoint warm start 和做单变量 ablation。
-- **不把重复 padding 当真实历史**：`history_valid` 和 `history_dt` 是必要的数据契约，否则 episode 开头的重复图像会被错误解释为稳定运动。
+**面试表述：** “我复现并扩展了 RoboMME 的 FrameSamp+Modul。历史帧先用 base Pi0.5 的 SigLIP 离线编码，在线只读取固定预算的历史 token；模型用时空位置编码区分帧和空间位置，再让 action expert cross-attend 这些 memory，并通过 RMSNorm 的 scale/shift 做调制。我还比较了均匀历史、只加首帧，以及提高 `is_key_frame` 采样权重三种数据策略。”
 
-这个方案本质上是短时视觉记忆，不是跨 episode 的 persistent memory。它能补充遮挡、运动趋势和当前帧歧义，但无法解决长时任务状态、事件摘要或外部记忆检索问题。
+#### 3.3 DM05-style memory：稀疏长历史作为 VLM prefix（正在验证）
+
+**一句话原理：** 不只看短窗口，而是在同一个 episode 内按较大的时间间隔抽取一段严格过去的 top-head 图像，把每帧压缩成少量视觉 token 后，和当前图像、语言一起放入 VLM prefix，让模型在生成动作前形成更长时间尺度的场景状态表示。
+
+**当前实现。** `train_robodojo_official_100_cover_blocks_dm05style_mem.sh` 使用 Pi0.5，在 RoboDojo 官方 100 个 cover-blocks episode 上训练。配置为 `history_frames=20`、`history_stride=25`：每个当前样本携带 20 张严格过去的 `cam_high` 帧，时间间隔为 25 个 action step，当前帧仍由普通相机输入提供。每张历史帧经过共享 SigLIP 后，将视觉 token grid 做参数无关的 4×4 average pooling，变成每帧 16 个 token，总共 320 个 history token；`history_is_pad` 用来屏蔽 episode 开头不存在的历史。
+
+**与前两个方向的区别。** 这里历史 token 直接追加到 VLM prefix，与当前图像和语言共同参与 prefix attention，再由 action expert 使用最终的条件表示；它不是 FrameSamp 那种只在 action expert 内部 cross-attend 的 memory，也不是 Hy-VLA 那种在视觉塔内部做时空 attention。它更强调“记住较长时间范围内的任务状态”，例如物体在早期出现过什么、任务进度如何，而不是只恢复当前帧附近的运动细节。
+
+**当前状态和风险。** 该方向正在验证，暂时不提前宣称已经带来收益。主要需要检查长历史 token 是否挤压当前图像 / 语言的有效上下文、padding mask 是否正确，以及稀疏采样间隔是否适合不同任务；后续应至少做 current-only、短历史、20 帧历史和不同 pooling 比较，并观察动作成功率与长时任务表现。
+
+**面试表述：** “我正在验证一个 DM05-style 的长时 memory 方案：在官方 100 个 RoboDojo cover-blocks episode 上，从当前帧向前每隔 25 个 action step 取 20 帧 top-head 图像，用共享 SigLIP 编码并做 4×4 pooling，得到 320 个 history token，和当前视觉、语言一起作为 Pi0.5 的 prefix。它的目标是让模型保留早期物体和任务状态信息，目前还在做 ablation 和效果验证。”
+
+#### 3.4 三个方向的统一训练和比较方法
+
+三个方向都从已有 base checkpoint 初始化，在 RoboDojo 轨迹上预测当前时刻开始的 action chunk。Memory 只改变观测条件的组织方式，不改变动作空间和主要监督，因此可以用 current-only baseline 做相对公平的比较。面试中可以按四个维度总结：
+
+- **信息放置位置：** Hy-VLA 放在 vision encoder 内，FrameSamp+Modul 放在 action expert，DM05-style 放在 VLM prefix。
+- **时间范围：** Hy-VLA 是短时密集窗口，FrameSamp 是固定预算的可配置采样，DM05-style 是稀疏但更长的历史。
+- **计算方式：** Hy-VLA 在线参与视觉前向；FrameSamp 历史特征离线缓存；DM05-style 仍需对历史图像做 SigLIP 编码，但通过 pooling 控制 token 数。
+- **适用问题：** 短时遮挡 / 运动趋势更适合 Hy-VLA，首帧或关键历史条件更适合 FrameSamp，跨较长时间的物体与任务状态更适合 DM05-style。
+
+最重要的工程契约是：历史帧索引不能读到未来，训练和推理的时间顺序必须一致，首帧 padding 要有 mask，token budget / pooling / position embedding 必须与 checkpoint 配套；否则 loss 可能正常下降，但部署时模型看到的 memory 与训练语义不一致。
 
 # 三、面试复盘
 
