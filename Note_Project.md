@@ -1184,8 +1184,6 @@ inputs 做正向（数据集 → 模型），outputs 做逆向（模型 → 真�
 
 ## 魔法原子工作总结-VLA算法工程师-magicvla预训练方向
 
-> 用途：面试复习。重点讲清本人做了什么、输入输出是什么、关键技术选择及原因，而不是罗列代码模块。
-
 ### 项目总框架
 
 ```text
@@ -1240,6 +1238,11 @@ action[t:t+50]：未来 50 步动作 chunk
 dim_mask：该维度是否真实存在并参与输入/loss
 camera_valid：当前样本实际具备哪些相机
 ```
+
+
+
+
+
 
 | 索引 | 维度 | 语义 |
 |---|---:|---|
@@ -1455,6 +1458,222 @@ full-attention 中序列固定为 `[VLM prefix, action suffix]`，mask 是非对
 - **适用问题：** 短时遮挡 / 运动趋势更适合 Hy-VLA，首帧或关键历史条件更适合 FrameSamp，跨较长时间的物体与任务状态更适合 DM05-style。
 
 最重要的工程契约是：历史帧索引不能读到未来，训练和推理的时间顺序必须一致，首帧 padding 要有 mask，token budget / pooling / position embedding 必须与 checkpoint 配套；否则 loss 可能正常下降，但部署时模型看到的 memory 与训练语义不一致。
+
+## 3.5 VLA/Transformer 基础手撕模块
+### 1. Self-Attention
+
+Self-Attention 让序列中的每个 token 根据其他 token 的信息更新自身表示。输入为 `X ∈ R^{B×L×D}`，先通过三个线性层得到 Query、Key 和 Value：
+
+$$
+Q=XW_Q,\quad K=XW_K,\quad V=XW_V
+$$
+
+注意力计算为：
+
+$$
+S=\frac{QK^T}{\sqrt{d_k}},\quad A=\operatorname{softmax}(S+M),\quad Y=AV
+$$
+
+其中 `M` 是 attention mask，最后通常再经过一个输出投影 `W_O`。
+
+```python
+def self_attention(x, w_q, w_k, w_v, w_o, mask=None):
+    q = x @ w_q
+    k = x @ w_k
+    v = x @ w_v
+    score = q @ k.transpose(-2, -1) / math.sqrt(q.shape[-1])
+    if mask is not None:
+        score = score.masked_fill(~mask, float("-inf"))
+    weight = torch.softmax(score, dim=-1)
+    return (weight @ v) @ w_o
+```
+
+在 MagicVLA 中，Qwen 的 full-attention 层以及 Action Expert 的 `QwenJointFullAttention` 都建立在这个公式上。
+
+### 2. Masked Attention
+
+Mask 的作用是限制某个 Query 可以读取哪些 Key。常见类型有：
+
+- **Causal mask**：当前位置不能读取未来 token，用于语言模型；
+- **Padding mask**：忽略补齐位置；
+- **非对称 mask**：不同模态之间采用不同的可见性。
+
+MagicVLA 的 full-attention 逻辑可以概括为：
+
+```text
+VLM query     -> 只能读取 VLM prefix
+Action query  -> 可以读取 VLM prefix 和整个 action chunk
+```
+
+因此 VLM 不会读取 noisy action，避免动作噪声污染视觉语言表示；Action Expert 可以使用完整的视觉语言条件和 action chunk 内部信息。
+
+最小的 masked attention 写法如下：
+
+```python
+score = q @ k.transpose(-2, -1) / math.sqrt(d)
+score = score.masked_fill(~allowed, float("-inf"))
+attn = torch.softmax(score, dim=-1)
+out = attn @ v
+```
+
+### 3. RMSNorm
+
+RMSNorm 只根据均方根缩放特征，不计算均值：
+
+$$
+\operatorname{RMS}(x)=\sqrt{\frac{1}{D}\sum_{i=1}^{D}x_i^2+\epsilon}
+$$
+
+$$
+\operatorname{RMSNorm}(x)=\frac{x}{\operatorname{RMS}(x)}\odot\gamma
+$$
+
+最小实现：
+
+```python
+def rms_norm(x, weight, eps=1e-6):
+    rms = torch.sqrt(x.float().square().mean(-1, keepdim=True) + eps)
+    return (x.float() / rms * weight.float()).to(x.dtype)
+```
+
+MagicVLA 的 `QwenRMSNorm` 使用 `1 + weight` 作为缩放因子，使参数初始化为 0 时接近恒等映射。
+
+### 4. SwiGLU
+
+SwiGLU 是 Qwen 使用的 MLP 结构，由 gate 分支、up 分支和 down 分支组成：
+
+$$
+\operatorname{SwiGLU}(x)=\left[\operatorname{SiLU}(xW_g)\odot(xW_u)\right]W_d
+$$
+
+```python
+def swiglu(x, gate_proj, up_proj, down_proj):
+    gate = torch.nn.functional.silu(gate_proj(x))
+    up = up_proj(x)
+    return down_proj(gate * up)
+```
+
+在 Action Expert 中，当前维度大致是：
+
+```text
+1024 -> 3072 -> 1024
+```
+
+它替代普通的 `Linear -> GELU -> Linear`，通过 gate 控制不同特征的保留程度。
+
+### 5. RoPE
+
+RoPE 通过旋转 Query 和 Key 来编码位置信息。二维形式为：
+
+$$
+\begin{bmatrix}x_1'\\x_2'\end{bmatrix}
+=
+\begin{bmatrix}\cos\theta & -\sin\theta\\
+\sin\theta & \cos\theta\end{bmatrix}
+\begin{bmatrix}x_1\\x_2\end{bmatrix}
+$$
+
+其中 `θ` 由 token 的位置决定。对 Q、K 同时施加旋转后，内积自然包含相对位置信息。
+
+```python
+def apply_rope(x, cos, sin):
+    x1, x2 = x.chunk(2, dim=-1)
+    rotated = torch.cat([-x2, x1], dim=-1)
+    return x * cos + rotated * sin
+```
+
+MagicVLA 使用 Qwen 的 RoPE。图像侧使用多模态的 3D position id，动作 token 则使用连续的 action position；这样模型可以区分不同时间步的动作以及图像中的空间位置。
+
+### 6. Flow Matching
+
+Flow Matching 让模型学习从噪声动作到真实动作的连续变化方向。设真实动作为 `x_0`，随机噪声为 `ε`，随机时间为 `t∈[0,1]`：
+
+$$
+x_t=(1-t)x_0+t\epsilon
+$$
+
+对于线性路径，目标速度为：
+
+$$
+u_t=\frac{dx_t}{dt}=\epsilon-x_0
+$$
+
+模型输入带噪动作 `x_t`、时间 `t`、state 和 VLM 条件，输出预测速度：
+
+```python
+noisy_action = (1 - t) * action + t * noise
+target_velocity = noise - action
+pred_velocity = action_expert(noisy_action, t, state, vlm_context)
+```
+
+推理时从高斯噪声开始，沿反方向用 Euler 方法逐步更新：
+
+```python
+action = torch.randn_like(action)
+for _ in range(num_steps):
+    velocity = model(action, time, condition)
+    action = action - velocity / num_steps
+```
+
+### 7. Masked MSE
+
+MagicVLA 的主要动作损失是预测速度和目标速度之间的均方误差：
+
+$$
+L_{MSE}=\frac{1}{N}\sum_i m_i(\hat{v}_i-v_i)^2
+$$
+
+其中 `m_i` 表示该动作元素是否有效。项目中需要同时考虑 action padding 和动作维度 mask：
+
+```python
+valid = (
+    ~action_is_pad.unsqueeze(-1)
+) & action_dim_mask
+
+error = (pred_velocity - target_velocity).square()
+loss = (error * valid).sum() / valid.sum().clamp_min(1)
+```
+
+这样可以避免：
+
+- episode 末尾补齐的动作参与训练；
+- 不存在的机器人维度参与训练；
+- 缺失动作被错误当成真实的 0。
+
+### 8. Cross-Attention
+
+Cross-Attention 和 Self-Attention 的区别是：Query 和 Key/Value 来自不同序列。
+
+```text
+Query：当前 action token
+Key/Value：历史 memory token
+```
+
+公式为：
+
+$$
+Q=X_{current}W_Q,\quad K=X_{memory}W_K,\quad V=X_{memory}W_V
+$$
+
+$$
+Y=\operatorname{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V
+$$
+
+最小实现：
+
+```python
+def cross_attention(query, memory, w_q, w_k, w_v):
+    q = query @ w_q
+    k = memory @ w_k
+    v = memory @ w_v
+    weight = torch.softmax(
+        q @ k.transpose(-2, -1) / math.sqrt(q.shape[-1]),
+        dim=-1,
+    )
+    return weight @ v
+```
+
+在 RoboMME-style memory 中，Action Expert 用当前动作特征作为 Query，历史视觉特征作为 Key/Value；在 MagicVLA Base 中，类似的条件读取发生在 full-attention 层，只是 Action Expert 同时读取 VLM prefix 和 action chunk。
 
 # 三、面试复盘
 
