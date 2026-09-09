@@ -1369,6 +1369,67 @@ full-attention 中序列固定为 `[VLM prefix, action suffix]`，mask 是非对
 
 因此 action 可以使用视觉语言条件和整个未来 chunk 的协同信息；VLM 永远看不到动作 target，不产生动作信息泄漏。两支 hidden size 虽为 `2048/1024`，但 full-attention 的 head 规格兼容，attention 后再分别走各自的 output projection。
 
+##### 2.2.1 Qwen 与 Action Expert 关键参数对照
+
+以下按 `magicvla/configs/train/magicvla_base_pretrain_robot_group_8data_eo_wandb_200k.yaml` 汇总。**Qwen 指 VLM 的语言骨干，不包括视觉塔。** 本次环境未找到配置指定的 Qwen checkpoint；Qwen hidden size 依据仓库文档，层型与注意力规格依据 `MagicVLABasePolicy._validate_hybrid_layout()` 的强制匹配检查，未直接读取 checkpoint 核验。
+
+| 整体参数 | Qwen 语言骨干 | Action Expert |
+|---|---|---|
+| hidden size：每个 token 的主干宽度 | 2048 | 1024 |
+| 层数 | 24 | 24 |
+| 层型排列 | `[DeltaNet × 3 → Full Attention] × 6` | 相同 |
+| DeltaNet / Full Attention 层数 | 18 / 6 | 18 / 6 |
+| SwiGLU 中间维度 | 本次未核实 | 3072 |
+| token 数量 | 图像、文本和状态构成的 prefix 长度 L | 50 个动作时刻 |
+| 主干特征形状 | `[B, L, 2048]` | `[B, 50, 1024]` |
+
+**Full Attention 规格：主干宽度不同，但投影后的头规格一致。**
+
+| 参数 | Qwen | Action Expert |
+|---|---|---|
+| Q 头数 | 8 | 8 |
+| K/V 头数 | 2 | 2 |
+| 每头维度 | 256 | 256 |
+| Q 总宽度 | 2048 | 2048 |
+| K、V 各自总宽度 | 512 | 512 |
+| 注意力输出投影 | `2048 → 2048` | `2048 → 1024` |
+
+8 个 Q 头共享 2 组 K/V，即每 4 个 Q 头共享一组 K/V（GQA）。AE 的 `q_proj` 同时生成 Q 和 gate，因此实际线性层输出为 `4096 = 2048 Q + 2048 gate`。
+
+在第 4、8、12、16、20、24 层，Qwen 当前层输入经归一化及其自身 K/V 投影生成条件；AE 用自己的投影生成 Q/K/V。两支 K/V 分别为 `[B, 2, L, 256]` 和 `[B, 2, 50, 256]`，沿序列维拼为 `[B, 2, L+50, 256]`，供 AE 的 Q 读取。AE 在一次注意力计算中同时读取 VLM 条件与动作 chunk；Qwen 仍单独运行原生层，不读取动作 suffix。
+
+**DeltaNet 规格：两支分别运行，不交换 K/V。**
+
+| 参数 | Qwen | Action Expert |
+|---|---|---|
+| Q/K 头数 | 16 | 16 |
+| V 头数 | 16 | 16 |
+| Q/K 每头维度 | 128 | 128 |
+| V 每头维度 | 128 | 128 |
+| Q、K、V 各自总宽度 | 2048 | 2048 |
+| 因果卷积核大小 | 4 | 4 |
+
+DeltaNet 的 16 头与 Full Attention 的 8 个 Q 头属于不同模块。层型和头规格对齐是当前实现的设计选择，不意味着两支共享全部参数，也不是所有 VLA 都必须如此设计。
+
+**AE 输入与输出：**
+
+```text
+带噪动作 [B, 50, 32] → Linear(32, 1024) → [B, 50, 1024]
+                         + 位置 embedding [1, 50, 1024]
+                         + state MLP 输出 [B, 1024]，广播到 50 个位置
+                         + flow-time embedding [B, 1024]，广播到 50 个位置
+                         ↓
+                     24 层混合骨干
+                         ↓
+               RMSNorm → Linear(1024, 32)
+                         ↓
+                  velocity [B, 50, 32]
+```
+
+AE 的 state MLP 为 `32 → 1024 → 1024`；VLM prefix 的状态投影是另一套 MLP，输入包含 state 与 mask。**32 是动作空间维度，1024 是 AE 主干宽度，256 是 Full Attention 每头维度。** flow time 表示噪声阶段，与 chunk 内的动作位置不同；输出 velocity 是 flow 空间变化率，不等同于关节物理速度。
+
+代码入口（均位于 `magicvla/src/models/magicvla_base/modeling_magicvla_base.py`）：`QwenHybridActionExpert` 组装专家，`embed_inputs()` 注入输入条件，`QwenJointFullAttention` 处理 K/V 交互，`_run_joint_trunks()` 按层调度两支，`_validate_hybrid_layout()` 校验规格兼容性。
+
 #### 2.3 32D 训练与推理契约
 
 训练机器人 batch 的目标是归一化后的 `action[50,32]`。采样 `$t\sim Beta(1.5,1.0)$` 并截断到 `[0.001,0.999]`，构造 `$x_t=(1-t)a+t\epsilon$`，模型预测 velocity `$\epsilon-a$`。loss 只在 `~action_is_pad & action_dim_mask` 的元素上计算，可选提高前几个可执行 horizon 的权重。
@@ -1391,9 +1452,76 @@ full-attention 中序列固定为 `[VLM prefix, action suffix]`，mask 是非对
 
 #### 2.5 面试回答要点
 
+以下按当前 32D、50-step MagicVLA-base 配置回答；`B` 为 batch size，`L` 为多模态条件 prefix 长度。
+
+**1. VLA 的视觉编码部分怎么做？**
+
+三路相机图像先等比例缩放并补边到 `256×256`，再由 Qwen 原生 processor 和视觉编码器处理：切成 patch，经过视觉骨干提取特征，再通过合并、投影形成宽度为 `2048` 的视觉 token，插入语言序列的图像占位位置。切 patch 只是第一步，视觉 token 数要以 processor 产生的图像网格为准。
+
+**2. 视觉 token 的位置信息怎么嵌入？**
+
+视觉编码器内部处理 patch 的空间位置；进入语言骨干后，`compute_3d_position_ids()` 根据图像网格等信息生成时间、高度、宽度位置 ID，再通过 Qwen 的多模态旋转位置编码作用于注意力 Q/K。**RoPE 虽使用正弦、余弦，但它旋转的是 Q/K，不是简单把正余弦向量加到 token embedding 上。**
+
+**3. 自注意力本身不编码位置，动作序列怎么处理？**
+
+AE 为 50 个动作位置设置可学习的 embedding，形状为 `[1,50,1024]`，加入动作特征；full-attention 中还对动作 Q/K 使用 RoPE。不同动作位置的 embedding 不同，同一组位置 embedding 在 batch 间共享。动作位置表示未来第几步，flow-time embedding 表示当前噪声阶段，两者不能混淆。各位置共享网络参数和当前样本的 state/time 条件，不是共享动作值。
+
+**4. Flow matching 做动作生成，输入来自哪里？**
+
+AE 的直接输入为带噪动作 `x_t [B,50,32]`、flow time `t [B]` 和当前 state `[B,32]`；图像、文本和状态形成的 VLM prefix 提供条件。训练时构造 `x_t=(1-t)a+tε`，目标 velocity 为 `ε-a`；推理时从高斯噪声开始迭代更新。两支逐层运行，在 6 个 full-attention 层拼接 K/V，最终预测 `[B,50,32]` 的 velocity。**不是两支完整跑完后再拼特征；flow matching 是训练和生成方法，不是 backbone 后额外的模块。**
+
+**5. Flow matching 使用的 VLM 向量怎么理解？**
+
+它是一串经过上下文融合的条件特征 `[B,L,2048]`，表达图像、任务文本与当前状态；AE 读取对应 full-attention 层的中间特征生成的 K/V，而非只读取最终一个向量。`state(32)` 与 `mask(32)` 拼成 64 维后，经 MLP 形成 1 个状态 token。真实 action chunk 不属于 AE 可读取的 prefix；训练追加的 FAST 动作 token 仅用于语言 CE，AE 不能读取，避免答案泄漏。
+
+**6. 交互注意力的 Q、K、V 来自哪里？**
+
+Q 来自 AE；K/V 来自 VLM prefix 和 AE 两部分，使用各自的投影后沿 token 维拼接：`Q=Q_action`，`K=[K_vlm;K_action]`，`V=[V_vlm;V_action]`。因此是非对称 joint attention：一次注意力同时读取外部条件和动作 chunk，VLM 自身不读取动作 suffix。
+
+| 张量 | 形状 |
+|---|---|
+| AE Q | `[B,8,50,256]` |
+| VLM K、V | 各为 `[B,2,L,256]` |
+| AE K、V | 各为 `[B,2,50,256]` |
+| 拼接 K、V | 各为 `[B,2,L+50,256]` |
+
+**7. 推理为什么比较快？K/V cache 起什么作用？**
+
+当前默认用 10 次 Euler 更新，每轮同时预测整段 50 步动作的 velocity，无需将动作离散后逐 token 自回归生成。固定观测下，VLM 不读取带噪动作，因此其条件不随 `x_t` 和 `t` 变化；视觉编码与 VLM prefix 只需计算一次，缓存 6 个交互层的 K/V，后续只运行较小的 AE。AE 自身 Q/K/V 随迭代变化，仍需每轮重算；观测、任务或状态变化后需重建 VLM cache。10 步是当前配置，实际延迟还取决于硬件、prefix 长度和执行后端。
+
+```text
+视觉编码 + VLM 前向一次 → 缓存 6 层 prefix K/V
+                                  ↓
+高斯噪声 [B,50,32] → AE + Euler 更新 × 10 → 动作 chunk [B,50,32]
+```
+
+**其他设计与工程追问：**
+
 - **为什么不直接让 VLM 输出动作 token？** 50 步 32D 轨迹是连续、强时序相关的控制量。flow expert 在连续空间生成更合适，FAST 只作为保护 VLM 表征的辅助监督。
 - **为什么只在部分层 joint attention？** Qwen 的 DeltaNet 是递推线性注意力，强行拼接会破坏其状态语义；full-attention 层支持标准 Q/K/V 融合，6 次交互已能把条件传给 action branch。
 - **最重要的工程原则？** 32D 不只是 padding shape；mask、归一化、delta 规则、checkpoint metadata 和推理反归一化必须是一套契约。否则训练 loss 正常，部署动作仍可能是错误的。
+
+#### 手撕伪代码
+1. Scaled Dot-Product Attention
+```python
+def attention(q,k,v,mask=none):
+    # q: [B,H,Lq,d]
+    # k: [B,H,Lk,d]
+    # v: [B,H,Lk,d]
+    
+    d=q.shape(-1)
+
+    score=q@k.transpose(-2,-1)
+    score=score/sqrt(d)
+
+    if mask is not None:
+        score=score+mask
+
+    #这个 Query 把 100% 的注意力分配给这些 Key
+    weight=softmax(score,dim=-1)
+    out=weight@v
+    return out
+```
 
 ### 3. 后训练：memory 方向
 
