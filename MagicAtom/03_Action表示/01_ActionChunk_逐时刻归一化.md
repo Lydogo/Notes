@@ -8,6 +8,8 @@
 
 因此将 normalizer 从 `[D]` 扩展为 `[H,D]`：每个 chunk 位置 `h`、每个动作维度 `d` 使用独立统计量。这里的 timestep 是 chunk 内位置，不是轨迹绝对时间，也不是 flow 的噪声时间。
 
+基础查阅：[动作表示与归一化](../../Note_Basics.md#basic-normalization)。
+
 ## 2. 数学形式
 
 ```text
@@ -40,7 +42,7 @@ absolute action/state
 
 ## 5. 当前实现状态
 
-- 代码已支持逐位置统计，但开关默认关闭，现有训练 YAML 尚未启用。
+- 代码支持逐位置统计，已有显式启用 `action_stats_per_horizon` 的实验配置；是否启用取决于所选配方。配置存在不等于已验证闭环收益。
 - 训练统计链路已打通；部分 open-loop 可视化脚本仍按 `[D]` inverse normalization，需要同步修改。
 - `mean_std` 模式的退化保护、VQA processor 的 shape guard、样本量随 `H×D` 分片等问题仍需检查。
 

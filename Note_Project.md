@@ -1,771 +1,108 @@
-# 一、基础知识
-## 机器人运动学
-### 基本动力学模型
-τ = D(q)q̈ + C(q, q̇) + G(q)
-| 符号             | 维度           | 含义            |
-| -------------- | ------------ | ------------- |
-| $\tau$         | $n \times 1$ | 关节驱动力矩向量      |
-| $D(q)$         | $n \times n$ | 质量/惯性矩阵（正定对称） |
-| $\ddot{q}$     | $n \times 1$ | 关节加速度向量       |
-| $C(q,\dot{q})$ | $n \times 1$ | 科氏力 + 离心力向量   |
-| $G(q)$         | $n \times 1$ | 重力向量          |
+# 核心项目与面试复盘
 
-### 动力学分析方法 牛顿欧拉法
-目标是给定机器人的关节位置 q、速度 q̇ 和加速度 q̈，计算出为了产生这个运动状态，每个关节需要施加多大的驱动力矩 τ
+本文保留超维动力、魔法原子项目和全部面试复盘。早期机械臂及Isaac Lab/RL实践见[辅助项目记录](Note_OtherProjects.md)，通用概念见[基础知识](Note_Basics.md)。
 
-## 坐标变换
-### 欧拉角
-#### 1. 定义
-**Z-Y-X 欧拉角**（又称 **航向-俯仰-横滚**，Yaw-Pitch-Roll）：
+- [超维动力](#project-chaowei)
+- [魔法原子](#project-magicatom)
+- [面试复盘](#interviews)
 
-- 先绕 **Z** 轴旋转 α（Yaw）  
-- 再绕 **新 Y** 轴旋转 β（Pitch）  
-- 最后绕 **新 X** 轴旋转 γ（Roll）
+# 一、项目实战
 
-角度向量：
-
-$$
-[\alpha,\ \beta,\ \gamma]
-$$
-
----
-
-#### 2. 单轴基础旋转矩阵
-
-绕当前坐标系 `i` 的各轴旋转角度 `θ` 时，对应的 **3×3 旋转矩阵** 如下：
-
-**绕 Z 轴旋转 α（Yaw）：**
-
-$$
-R_z(\alpha)=
-\begin{bmatrix}
-\cos\alpha & -\sin\alpha & 0 \\
-\sin\alpha &  \cos\alpha & 0 \\
-0          &  0          & 1
-\end{bmatrix}
-$$
-
-**绕 Y 轴旋转 β（Pitch）：**
-
-$$
-R_y(\beta)=
-\begin{bmatrix}
-\cos\beta  & 0 & \sin\beta \\
-0          & 1 & 0         \\
--\sin\beta & 0 & \cos\beta
-\end{bmatrix}
-$$
-
-**绕 X 轴旋转 γ（Roll）：**
-
-$$
-R_x(\gamma)=
-\begin{bmatrix}
-1 & 0          & 0           \\
-0 & \cos\gamma & -\sin\gamma \\
-0 & \sin\gamma &  \cos\gamma
-\end{bmatrix}
-$$
-
----
-
-#### 3. 合成旋转矩阵（Z-Y-X 欧拉角 → 旋转矩阵）
-
-按**当前轴顺序**右乘：
-
-$$
-R = R_z(\alpha)\cdot R_y(\beta)\cdot R_x(\gamma)
-$$
-
-展开结果：
-
-$$
-R =
-\begin{bmatrix}
-\cos\alpha\cos\beta &
-\cos\alpha\sin\beta\sin\gamma - \sin\alpha\cos\gamma &
-\cos\alpha\sin\beta\cos\gamma + \sin\alpha\sin\gamma \\[6pt]
-\sin\alpha\cos\beta &
-\sin\alpha\sin\beta\sin\gamma + \cos\alpha\cos\gamma &
-\sin\alpha\sin\beta\cos\gamma - \cos\alpha\sin\gamma \\[6pt]
--\sin\beta &
-\cos\beta\sin\gamma &
-\cos\beta\cos\gamma
-\end{bmatrix}
-$$
-
----
-
-### 坐标变换的两种解释：固定系左乘 vs 运动系右乘
-
-> 一句话区别：
-> **固定轴（外部视角）→ 左乘（Premultiply）**
-> **运动轴（本体视角）→ 右乘（Postmultiply）**
-
----
-
-#### 1 固定坐标系解释（Fixed-Frame / 左乘）
-
-| 说明 | 操作顺序 | 矩阵乘法顺序 |
-|---|---|---|
-| 所有变换都**绕最开始的固定系**进行 | 先旋转 → 再平移 | `T = Trans(d) · Rot(R)` |
-| 几何意义：把物体在“世界”里依次摆位 | 步骤 1：绕 `[0]` 旋转 → 得到 `[0']` <br> 步骤 2：沿 `[0]` 平移 → 得到 `[1]` | 左乘 |
-
-
----
-
-#### 2 运动坐标系解释（Moving-Frame / 右乘）
-
-| 说明 | 操作顺序 | 矩阵乘法顺序 |
-|---|---|---|
-| 每一步变换都**绕最新建立的动系**进行 | 先平移 → 再旋转 | `T = Trans(d) · Rot(R)` |
-| 几何意义：把物体“装”在动系上，再让动系自己动 | 步骤 1：沿 `[0]` 平移 → 得到 `[0']` <br> 步骤 2：绕**新轴 `[0']`** 旋转 → 得到 `[1]` | 右乘 |
-
-
-## IK 逆运动学
-正：已知 θ→T，用 DH/MDH 递推
-逆：已知 T→θ，解析法（Pieper 准则，三轴交于一点）或数值法（Newton-Raphson、Jacobian 伪逆、LM）。
-
-### 解析法
-解析法适用于结构较为简单的机械臂，可以通过几何或者代数方法进行求解。
-满足pieper准则才有解析解：三个相邻关节轴相交于一点或者三个相邻关节轴相互平行。
-
-### 数值法
-
-所有非解析 IK 都建立在「**雅可比线性化 + 迭代逼近**」之上。常用三种：标准雅可比逆、伪逆、阻尼伪逆。
-
-#### 1. 背景与目标
-
-> 给定末端目标位姿 $\mathbf{x}_d \in \mathbb{R}^m$，求关节角度 $\mathbf{q} \in \mathbb{R}^n$，使 $\mathbf{x}_d = f(\mathbf{q})$。
-
-$f$ 通常非线性，所以用「**线性化 + 迭代**」逼近解。
-
-#### 2. 核心关系：雅可比把关节速度映射到末端速度
-
-$$
-\dot{\mathbf{x}} = \mathbf{J}(\mathbf{q}) \dot{\mathbf{q}}
-$$
-
-- $\dot{\mathbf{x}} \in \mathbb{R}^m$：末端任务空间速度，常用 6×1 = 线速度 v(3) + 角速度 ω(3)。
-- $\dot{\mathbf{q}} \in \mathbb{R}^n$：n 个关节各自的转动速度。
-- $\mathbf{J}(\mathbf{q}) \in \mathbb{R}^{m \times n}$：雅可比矩阵，依赖当前关节角。
-- 直觉：**关节空间的小速度 → 任务空间的小速度**。"如果我把每个关节拧快一点点，末端会往哪边跑、跑多快？"
-
-#### 3. 一阶雅可比迭代法
-
-**初始化**：给定 $\mathbf{q}_0$、目标 $\mathbf{x}_d$、误差容限 $\epsilon$、最大迭代次数 $N$。
-
-**第 k 次迭代**：
-
-1. 当前位姿：$\mathbf{x}_k = f(\mathbf{q}_k)$
-2. 误差：$\Delta \mathbf{x}_k = \mathbf{x}_d - \mathbf{x}_k$
-3. 计算雅可比 $\mathbf{J}(\mathbf{q}_k)$
-4. 求关节速度：
-   - 非冗余（$m = n$）：$\dot{\mathbf{q}}_k = \mathbf{J}^{-1}(\mathbf{q}_k) \Delta \mathbf{x}_k$
-   - 冗余（$m < n$）：$\dot{\mathbf{q}}_k = \mathbf{J}^+(\mathbf{q}_k) \Delta \mathbf{x}_k$，其中 $\mathbf{J}^+ = \mathbf{J}^T (\mathbf{J} \mathbf{J}^T)^{-1}$ 是 **Moore–Penrose 伪逆**
-5. 更新关节：$\mathbf{q}_{k+1} = \mathbf{q}_k + \alpha \dot{\mathbf{q}}_k$（$\alpha$ 是小步长）
-6. 收敛判断：$\|\Delta \mathbf{x}_k\| < \epsilon$ 则停止；否则继续
-
-> 步骤 4 直觉：把"末端还差的速度"转换成"关节要补的速度"，就像齿轮比——末端差 1 mm/s，关节需要转多少 rad/s 才能补上。
-
-#### 4. 伪逆法（冗余机械臂）
-
-当 $n > m$ 系统**欠定**，有无穷多解。伪逆法求其中的**最小范数解**（能量最小）：
-
-$$
-\dot{\mathbf{q}} = \mathbf{J}^+ \dot{\mathbf{x}}
-$$
-
-- 在所有能满足末端速度 $\Delta \mathbf{x}$ 的关节速度里，挑一个"总转速最小"的；
-- 配合零空间投影还可以加避障 / 避奇异 / 关节限位等次级目标。
-
-#### 5. 阻尼伪逆（奇异问题）
-
-当 $\mathbf{J}$ 接近奇异（$\det \mathbf{J} \to 0$）时伪逆法数值不稳定。
-
-$$
-\mathbf{J}^* = \mathbf{J}^T (\mathbf{J} \mathbf{J}^T + \lambda^2 \mathbf{I})^{-1}
-$$
-
-- $\lambda$：阻尼因子，通常 $0.01 \sim 0.1$
-- 牺牲少量精度，换取数值稳定性
-
-#### 6. 三种方法对比
-
-| 方法 | 适用场景 | 优点 | 缺点 |
-|------|----------|------|------|
-| 雅可比逆法 | 非冗余机械臂（n = m） | 简单、直接 | 奇异时失效 |
-| 伪逆法 | 冗余机械臂（n > m） | 最小范数解 | 奇异时不稳定 |
-| 阻尼伪逆法 | 所有构型 | 鲁棒性强 | 精度略降 |
-
----
-
-## 规划算法
-### RRT*算法
-#### 1 算法定位
-| 维度        | 内容                                      |
-|-------------|-------------------------------------------|
-| 类型        | 基于采样的运动规划 |
-| 解决什么问题 | 高维连续 C-space 中找**可行**→**最优**路径 |
-| 对比 RRT    | RRT 只保证概率完备，RRT\* 额外持续优化，成本→c\* |
-
-#### 2 核心思想一句话
-> 在 RRT 随机扩张的基础上，**新增两步**：选父节点时选最小代价（不只是最近）；并对邻居做 **rewire**，让新采样点反过来优化已有路径。
-
-#### 3 算法流程
-
-RRT 基础流程：
-1. 初始化环境参数
-2. 随机采样 x_rand
-3. 寻找树中最近点 x_nearest
-4. 沿 x_nearest → x_rand 方向生长得到 x_new
-5. 碰撞检测
-6. 无碰撞则将 x_new 加入树
-
-RRT\* 在第 6 步前后多两步：
-
-- **(a) 重选父节点（Choose Parent）**：在 x_new 半径 r 内找到所有候选父节点，计算"经过候选父节点到达 x_new 的总代价"，选代价最小的作为真正父节点。
-- **(b) 重写邻居（Rewire）**：再次遍历半径 r 内的邻居，判断"经过 x_new 到达邻居"是否比邻居当前路径更短，是则把邻居的父节点改成 x_new。
-
-### A*算法
-#### 1 算法定位
-| 维度 | 内容 |
-|------|------|
-| 类别 | 图搜索 + 启发式（Informed Search） |
-| 完备性 | 是（只要解存在就能找到） |
-| 最优性 | 是（启发 h 可纳） |
-| 时间复杂度 | O(b^d)（最坏，b 分支因子，d 解深度） |
-| 空间复杂度 | O(b^d)（OPEN 与 CLOSED 表） |
-| 典型场景 | 2D 栅格导航、3D UAV 体素、任务级图、多关节离散网格 |
-
-#### 2 核心思想一句话
-> “每次从边界选 **‘当前代价 + 未来估计’最小** 的节点展开；只要估计不‘吹牛’(可纳)，第一次弹出目标即最优。”
-
-#### 3 启发式函数
-欧几里得距离：直线距离，开根号
-曼哈顿距离：网格地图，只允许四向移动，不用开根号 |x1-x2| + |y1-y2|
-
-<!-- ---
-
-### 3 数学符号
-
-
-- G=(V,E) 图，边权 w(e)≥ε>0  
-- g(n) = 从起点到 n 的最小已知代价  
-- h(n) = 从 n 到目标的 **启发估计代价**（heuristic）  
-- f(n) = g(n) + h(n)  （评估函数）  
-- h\*(n) = n→目标的 **真实最优代价**  
-- 可纳性 ⇔ ∀n, h(n)≤h\*(n)  
-- 一致性 ⇔ ∀(n,m)∈E, h(n)≤w(n,m)+h(m)  （更强，保证 reopen 最优）
-
----
-
-### 4 数据结构
-| 名称 | 用途 | 实现 |
-|------|------|------|
-| OPEN | 待扩展节点，按 f 小顶堆 | std::priority_queue / heapq |
-| CLOSED | 已扩展节点，防重复 | unordered_set / set |
-| Parent | 回溯路径 | dict / vector | -->
-
-
-## ROS2基本概念
-
-### 节点与通信
-- **节点（Node）**：ROS2 的基本计算单元，单一职责，通过话题 / 服务 / 参数与其他节点通信。
-- **话题通信**：发布/订阅（Pub/Sub）模式，异步、多对多，发布者把消息发到话题，所有订阅者都收到，两端不直接连接。
-
-### Launch
-用 Python launch 文件批量启动多个节点 + 参数 + remap。项目里有两个：
-
-| Launch 文件 | 职责 | 包含 |
-|---|---|---|
-| `robot_gazebo.launch.py` | 仿真环境 + 机器人模型 | `robot_state_publisher`（发模型） + Gazebo 仿真环境 + 在 Gazebo 中生成机器人实例 + 加载并激活控制器 |
-| `navi_launch.py` | 导航功能 | Nav2 导航框架 + 自定义 A* 规划器 + RViz2 可视化 |
-
-### Gazebo 仿真集成
-
-| 组件 | 作用 |
-|---|---|
-| `gazebo_ros` 包 | ROS2 与 Gazebo 之间的桥接 |
-| URDF 模型 | 定义机器人和环境模型 |
-| Gazebo 插件 | 连接 Gazebo 物理引擎与 ROS2 接口 |
-| `ros2_control` | 硬件抽象层，连接控制器与仿真 |
-
-
-# 二、项目实战
-## 个人项目
-
-### 1. ROS2 机械臂夹取项目
-
-#### 用到的库
-
-| 库 | 用途 |
-|---|---|
-| `rclpy` | ROS2 Python 客户端库，创建节点 / 发布者 / 订阅者 |
-| `gazebo_ros2_control` | 连接 Gazebo 仿真器与 ROS2 控制系统 |
-| `MoveIt2` | 运动规划与操作 |
-| `hardware_interface` | 硬件抽象层，连接控制器与机器人硬件 |
-| `robot_state_publisher` | 发布机器人 TF 变换 |
-| `joint_state_publisher` | 发布关节状态信息 |
-| `rviz2` | 可视化机器人状态与轨迹 |
-
-#### Pick-and-Place 实现
-
-##### 状态机枚举
-
-把整个 pick-place 流程拆成 5 个离散状态：
-
-```
-class StateMachineAction(enum.Enum):
-    GRAB     # 激活夹爪，抓取物体
-    DELIVER  # 运送物体
-    RELEASE  # 释放物体
-    HOVER    # 悬停在物体上方
-    HOME     # 返回初始位置
-```
-
-##### 话题与通信
-
-| 方向 | 接口 / 话题 | 用途 |
-|---|---|---|
-| Pub | `Float64MultiArray` → `joint_control_topic` | 把目标关节角发给 ros2_control 的 `JointGroupPositionController` |
-| Sub | `JointState` ← `/joint_states` | 拿到实测关节角 / 角速度 / 力矩，用于 FK 反馈与速度判稳 |
-| Sub | `Odometry` ← `/odom` | 拿到机器人基座在世界系的位姿；AGV 场景下需 `T_world_base` 做全局定位 |
-| Sub | `PoseStamped` ← `/goal_pose` | 接收外部点击的目标，RViz 2D Nav Goal 可直接发到此话题 |
-
-##### 运动学核心调用链
-
-| 调用 | 功能 |
-|---|---|
-| `self._panda.solve_fk(joint_states)` | FK：关节角 → 末端 4×4 齐次矩阵 → 填到 Odometry |
-| `self._panda.solve_ik(end_effector_target)` | IK：末端 Pose → 关节角，MoveIt2 内部默认用 KDL 求解 |
-| `move_fingers(..., FingersAction.OPEN/CLOSE)` | 返回平行夹爪最后两个关节角度，0 = 全开，1 = 全闭 |
-
-#### 遇到的问题
-
-##### 奇异点问题
-- **现象**：某关节速度暴涨。
-- **原因**：6DOF 逆解时无解（雅可比向量线性相关出现奇异值）。
-- **解决**：增加一个自由度，或在 yaml 配置里直接 lock 掉易出现奇异值的角度。
-
-#### 关于动力学的说明
-
-项目主要关注**运动学规划 + 基于位置的控制**：通过 IK 求解器算出目标关节角，再交给 ROS2 Control 的关节位置控制器执行。底层动力学由 Gazebo 根据 URDF 中的质量 / 惯量参数和控制器输出力矩自动仿真，本项目没有直接实现 RNE 等动力学推导。
-
-### 2. 海恒智能国科大机械臂项目
-
-#### task1 通信桥代码
-
-##### 背景
-AGX 上位机通过 HTTP 把数据传给 Docker 内部，需要一个通信桥脚本把数据转到 ROS 内，再调用 MoveIt 规划功能控制电机执行。
-
-##### 主要接口
-
-| 接口 | 功能 |
-|---|---|
-| `leg_move` | 腿部电机控制服务（服务端 + 客户端） |
-| `get_current_pose_http` | 获取当前末端执行器位姿（`position.x/y/z` + `orientation.x/y/z/w`，可直接给 move_group） |
-| `calculate_pre_position` | 计算从目标位置远离书架一定距离的中间位置，作为夹取前的预位 |
-| `calculate_target_position_from_pixel` | 像素坐标 → base 坐标 |
-| `plan_to_position` | 调用 move_group，把机械臂移动到目标位置 |
-
-##### 难点与细节
-
-**A. `plan_to_position` 运动规划演进**
-
-1. **方案 1（失败）**：直接用末端位置规划，频繁解算超时、候选路径过多。
-2. **方案 2（次优）**：观察 RViz 拖动末端的行为发现 move_group 内部倾向于关节空间规划；改成手动调 IK 解出关节角，再做关节空间规划。
-3. **新问题**：路径中间缺少约束，机械臂出现大幅"甩动"，路径品质差。
-4. **方案 3（最终）**：直接用 move_group 高级接口 `go()` 并设置位姿目标，让 move_group 内部自动完成 IK + 关节空间规划，并优选关节移动量最小的路径。
-
-**B. 像素 + 抓取角度 → 基座坐标系下的目标位姿**
-
-输入是 2D 像素 + 深度 + 期望抓取角度，输出是末端 6D 位姿（position + orientation）。
-
-1. **像素 → 相机坐标**：用相机内参做反投影得到三维点。
-2. **相机坐标 → 基座坐标**：用 `tf2_ros.Buffer.lookup_transform` 查 `camera_frame → base_frame` 的 TF，`ros_numpy.numpify` 转成 `T_base_cam`，矩阵乘法完成变换。
-3. **构建目标姿态**：
-   - 相机检测书本得到一个向量，通过 TF 旋转部分映射到基座系，作为夹爪 Z 轴。
-   - 与基座系 X 轴 `[1, 0, 0]`（保证夹爪垂直于书架）叉乘构建正交坐标系，得到旋转矩阵。
-   - 解算前先把夹爪坐标系对齐到基座系方向，简化"Z 对准向量、X 朝前"的逻辑；最后再做一次旋转补偿，回到夹爪 URDF 的实际坐标系。
-
-**C. 手眼标定流程**
-
-1. `realsense2`：相机驱动
-2. `aruco_ros`：marker 标定
-3. `easy_handeye`：坐标解算
-
-> 标定原则：**深度尽量保持不变，角度尽量多变**。
-
-#### task2 multi_action_server.py
-
-##### 背景
-ROS 节点，作为上层 MoveIt 与底层 CAN 总线电机之间的桥梁，确保多组关节（手臂、腿部）在运动时不会冲突。
-
-##### 难点与细节
-
-- **问题复盘**：状态读取指令无序插入动作指令序列（如 GOTO 执行中多次插入 STATE 读取），导致部分电机动作延迟、轨迹与预设不符。
-- **原因**：原控制机制中动作服务器高频读取电机状态，与动作指令无约束并发——动作指令未发完就被状态读取打断；同时存在非必要的状态读取浪费资源。
-- **解决**：
-  - 取消无约束高频定频读取；
-  - 增设约束：动作指令发送完成前禁止状态获取；
-  - 优化控制锁范围，删除无效长时间锁占用，避免锁竞争。
-
-## RL项目实践复盘&Isaaclab使用
-### 25.12.27 | 环境定义架构
-
-#### 1. 配置类（@configclass）
-* **本质**：纯数据容器（Python Decorator），不含运行逻辑。
-* **作用**：实现参数与逻辑解耦。通过修改配置类即可切换物理属性，无需改动环境核心代码。
-
-#### 2. Spawn 属性
-* **机制**：支持配置对象的继承与复用。
-* **随机化**：通过 `spawn` 实现资产的参数化定义，是实现大规模并行环境随机化的核心入口。
-
-#### 3. 架构解耦
-* **物理资产**（Asset）与**控制逻辑**（Manager）彻底分离。
-* 资产层只定义“物体是什么”，逻辑层（Reward/Obs/Action Managers）定义“怎么做”。
-
----
-
-### 26.1.4 | Docker 部署与项目跑通
-
-#### 1. Docker Build 网络故障
-* **问题**：`build` 过程中 `git clone` 失败。主机全局代理无效，因 Docker 编译环境与宿主机网络默认不互通。
-* **解决方法**：
-    1.  `docker-compose.yaml`：在 `build` 标签下添加 `network: host` 强制共享宿主机网络。
-    2.  `Dockerfile.base`：显式设置环境变量 `ENV http_proxy` 和 `ENV https_proxy`。
-
-#### 2. 容器操作流程
-* **标准步骤**：`container.py start` -> `container.py enter`。
-* **注意**：必须通过 `enter` 脚本进入容器，系统会自动挂载路径并配置 `PYTHONPATH` 等环境变量，手动 `docker exec` 会导致路径报错。
-
-#### 3. 项目运行与迁移
-* **基础链路**：`train.py` 训练模型 -> `play.py` 加载模型演示。
-* **API 兼容性**：老旧项目需对比官方最新 Demo 检查 `ManagerTermBase` 等 API 的函数签名，重点关注参数名的更新。
-
-#### 4. 数据可视化（Tensorboard）
-* **避坑**：Docker 内端口转发不稳定，且占用容器资源。
-* **最佳实践**：在宿主机终端直接运行，通过挂载的 `logs` 目录实时读取：
-    ```bash
-    tensorboard --logdir .
-    ```
----
-
-### 26.1.5 | Lift 项目跑通与核心逻辑
-
-#### 1. 环境注册机制（Registration）
-* **流程**：Isaac Lab 通过 `gym.register` 将环境加入注册表。`train.py` 或 `play.py` 通过 `--task` 参数从注册表中检索配置。
-* **入口**：注册信息通常集中在模块的 `__init__.py` 中。
-* **链式导入**：通过 `from . import config` 等语句实现层层递进式加载，确保在运行脚本前，所有自定义环境配置已注入 Gym 注册表。
-
-#### 2. 观测空间设计（Observations）
-* **泛化性原则**：优先使用**相对坐标**。相比绝对坐标，相对坐标（如物体相对于机器人基座）能让策略更易学习空间几何关系，提高在不同初始位姿下的泛化能力。
-* **坐标转换**：利用 `subtract_frame_transforms` 将物体从世界坐标系（World Frame）转换至机器人局部坐标系（Local/Root Frame）。
-    ```python
-    # 实现世界系到局部系的转换：(物体世界位姿 - 机器人世界位姿)
-    object_pos_b, _ = subtract_frame_transforms(
-        robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], object_pos_w
-    )
-    ```
-
-#### 3. 奖励函数结构（Rewards）
-Lift 示例通常包含三个关键引导项：
-* `object_is_lifted`：物体是否离开台面的离散/连续奖励。
-* `object_ee_distance`：末端执行器（EE）与物体的接近诱导奖励。
-* `object_goal_distance`：物体与目标位置的距离惩罚。
-
----
-
-### 26.1.6 | 源码追踪与任务迁移
-
-#### 1. 开发技巧：函数跳转
-* **痛点**：由于 Isaac Lab 路径复杂，IDE 默认无法直接跳转到外部库定义。
-* **解决方法**：`Ctrl+Shift+P` -> `Tasks: Run Task` -> 运行一次 Isaac Lab 提供的 Python 环境配置脚本，使 IDE 索引生效。
-
-#### 2. 源码阅读注意点
-* **版本差异**：Isaac Lab 迭代快，不同分支的代码实现（如库的调用路径）可能存在偏差。务必以当前本地库的源码定义为准进行修改。
-
-#### 3. 任务拓展：从 Cube 迁移到长方体（模拟书本）抓取
-若要训练机械臂从薄面抓取长方体，需从以下维度调整：
-* **观测（Obs）**：必须引入**物体旋转角（Orientation）**，否则策略无法感知长方体的长短边，无法精准定位抓取面。
-* **奖励（Rewards）**：
-    * 增加姿态对齐奖励（如 EE X轴与物体法线的夹角）。
-    * 增加抓取稳定性奖励。
-* **算法配置（RSL_RL）**：算法逻辑通常无需改动，但针对更精细的任务，可能需要微调学习率（Learning Rate）或增加训练迭代次数（Max Iterations）。
-* **配置注册**：需新建对应的配置文件并在 `__init__.py` 中更新注册信息。
-
-### 26.1.7 | 长方体抓取：奖励破解与物理约束
-
-#### 1. 奖励破解（Reward Hacking）现象
-* **问题**：改成长方体后，机械臂学会了通过“侧蹭”使物体竖立来骗取 `lift_object` 分数，而非真正夹取。
-* **成因**：`lift_object` 权重过高且目标高度阈值设定过低，导致“竖立”动作产生的位移足以触发奖励。
-
-#### 2. 引导奖励与物理极限
-* **优化**：引入 `EE_to_object_distance` 奖励，强制末端靠近重心中点，抑制“蹭”的行为。
-* **失败分析（紫色曲线）**：增加抬升高度后任务失败。对比 Tensorboard 曲线发现，抬升奖励归零是因为设置的高度**超出了机械臂的物理可达范围（Workspace Limit）**。
-* **反思**：奖励目标必须设定在机器人运动学范围内，否则会引导策略进入死胡同。
-
-![RL_26.1.7](Picture/RL_260107_01.png "RL_26.1.7")
-
----
-
-### 26.1.8 | 姿态对齐与 Sim2Real 预演
-
-#### 1. 随机化与观测增强
-* **Domain Randomization**：在 `EventCfg` 中增加初始偏航角（Yaw）随机化，模拟物体在书架上的不同摆放姿态。
-* **Sim2Real 衔接**：模拟相机检测逻辑，将“物体中心指向倾斜方向的向量”注入观测空间（Observations），为后续实机部署对齐数据流。
-
-#### 2. 引导对齐奖励（Orientation Guidance）
-为引导夹爪从薄面夹取，新增两项奖励：
-* **平行奖励**：EE 的 X 轴与物体向量平行。
-* **垂直奖励**：EE 的 Z 轴与物体向量垂直。
-
-#### 3. 负面现象：任务后过度调整（Over-optimization）
-* **现象**：物体举起后，夹爪为追求姿态分持续扭动，导致机械臂高频抖动或姿态扭曲。
-* **根源**：
-    1.  `joint_vel` 和 `action_rate` 惩罚项过小，不足以抑制高频震荡。
-    2.  奖励函数在任务完成后未失效，导致 AI 在高处“刷分”。
-
-#### 4. 改进思路：奖励消隐与参考系切换
-* **线性消隐（Linear Decay）**：引入线性插值，随着物体高度增加（任务接近完成），逐渐降低姿态奖励的权重，使机器人后期专注于稳定维持。
-* **坐标系重构**：考虑将夹爪对齐目标由“物体局部向量”改为“世界坐标系轴向”。
-    * **优点**：物体的局部向量在被抓起旋转时会剧烈变动，导致奖励不稳定；对齐世界坐标系（如垂直于地面）通常能提供更稳定的梯度。
-
-### 26.1.13 | PPO 算法原理（基于 rsl_rl 源码）
-
-#### 1. 核心损失函数
-PPO 通过限制策略更新幅度来确保训练稳定性。其核心公式为：
-
-* **策略裁剪（Clip Surrogate Object）**: 
-    $$L^{CLIP}(\theta) = \hat{\mathbb{E}}_t \left[ \min \left( r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right]$$
-* **总损失函数（Total Loss）**: 
-    $$L_t^{PPO}(\theta) = \hat{\mathbb{E}}_t \left[ L_t^{CLIP}(\theta) - c_1 L_t^{VF}(\theta) + c_2 S[\pi_{\theta}](s_t) \right]$$
-
-#### 2. Actor-Critic 模型结构
-* **Actor（策略网络）**：输出动作的均值 $\mu$。通过 `std`（标准差）参数构建正态分布进行采样，维持探索性。
-* **Critic（价值网络）**：输出状态价值 $V(s)$，用于评估当前局面的好坏。
-
-#### 3. 计算比例和Clip损失
-```python
-# Actor-Critic简化逻辑示意
-class ActorCritic(nn.Module):
-    def __init__(self, ...):
-        # 定义策略网络 (Actor)
-        self.actor = nn.Sequential(...) # 输出动作均值 mu
-        # 定义价值网络 (Critic)
-        self.critic = nn.Sequential(...) # 输出状态价值 V(s)
-        # 动作标准差 (Action Standard Deviation)，代表探索的随机性
-        self.std = nn.Parameter(torch.ones(num_actions))
-
-    def act(self, observations):
-        # 采样动作：根据正态分布 N(mu, std)
-        mu = self.actor(observations)
-        dist = Normal(mu, self.std)
-        action = dist.sample()
-        return action, dist.log_prob(action), self.critic(observations)
-```
-```python
-# 获取新旧策略的动作概率比
-actions_log_prob_batch = self.actor_critic.get_actions_log_prob(obs_batch, actions_batch)
-ratio = torch.exp(actions_log_prob_batch - old_actions_log_prob_batch)
-
-# PPO Clipped Objective
-surrogate = -advantages_batch * ratio
-surrogate_clipped = -advantages_batch * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
-# 取两者中的最大值（因为这里带了负号，等同于论文里的 min）
-action_loss = torch.max(surrogate, surrogate_clipped).mean()
-```
-```python
-# Critic 的损失：预测值与目标值 (Returns) 的均方误差
-value_loss = (return_batch - value_batch).pow(2).mean()
-```
-```python
-# 鼓励探索
-entropy_loss = dist.entropy().mean()
-```
-```python
-# 总损失 = 策略损失 + 价值损失权重 * 价值损失 - 熵权重 * 熵损失
-loss = action_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_loss
-
-# 反向传播
-self.optimizer.zero_grad()
-loss.backward()
-self.optimizer.step()
-```
-#### 4. 优势函数计算：GAE (Generalized Advantage Estimation)
-GAE 通过权衡偏差（Bias）和方差（Variance）来计算优势函数 $\hat{A}_t$。
-* **TD 误差（$\delta$）**: $r_t + \gamma V(s_{t+1}) - V(s_t)$。
-* **递归计算**: 结合 $\gamma$（折扣因子）和 $\lambda$（平滑参数）进行逆序计算，平滑优势估计。
-```python
-def compute_returns(self, last_values, gamma, lam):
-    advantage = 0
-    for step in reversed(range(self.num_transitions_per_env)):
-        next_values = last_values if step == self.num_transitions_per_env - 1 else self.values[step + 1]
-        # TD 误差 delta
-        delta = self.rewards[step] + gamma * next_values * self.not_done[step] - self.values[step]
-        # GAE 递归计算
-        advantage = delta + gamma * lam * self.not_done[step] * advantage
-        self.advantages[step] = advantage
-        self.returns[step] = self.advantages[step] + self.values[step]
-```
-
----
-
-### 26.1.14 | 任务进阶：从 Lift 到 Grasp & Pull
-
-#### 1. 任务迁移
-目标由单纯的垂直抬升（Lift）转变为从书架中夹取并向外拉出（Pull）。
-
-#### 2. 坐标系陷阱：全局 vs 局部
-**痛点**：在 Isaac Lab 大规模并行仿真中，环境按 `env_spacing` 平铺分布。
-* **全局坐标（root_pos_w）**：每个环境的坐标系原点在世界空间中是不同的。
-* **风险**：若直接用全局 $X$ 坐标设定奖励阈值，除 0 号环境外，其他环境可能在起始点就已触发奖励（刷分），导致梯度爆炸或模型无法收敛。
-
-**解决方案**：永远使用**相对坐标**计算奖励逻辑。
-```python
-# 将物体的世界 X 坐标减去该环境在世界系中的原点 X 坐标
-relative_x = object.data.root_pos_w[:, 0] - env.scene.env_origins[:, 0]
-
-# 基于相对位移判断拉出状态
-is_pulled = relative_x < (target_x_offset - minimal_distance)
-```
-
----
-
-### 26.1.15 | 权重分配与训练稳定性
-
-#### 1. 任务阶段权重失衡：Reach vs. Pull
-* **现象**：末端执行器（EE）夹住书本后停止动作。
-* **根源**：任务被分为“接近（Reach）”与“拉出（Pull）”两个阶段。若 Reach 阶段的引导奖励（距离、对齐等）权重过大，而 Pull 阶段（目标追踪、位移）权重过小，Agent 会倾向于停留在接近状态以稳拿高分，失去后续冒险拉出的动力。
-* **对策**：显著提升 Pull 相关项（如 `pulling_object`）的权重，确保后期奖励远高于前期引导奖励。
-
-#### 2. 终止条件导致的 Value Loss 爆炸
-* **现象**：增加“书本倒下”的终止条件（Termination）后，Value Loss 飙升至 `inf`。
-* **原理**：在 PPO 中，Critic 网络负责预测长期回报。如果环境突然终止（书本倒下）却没有任何对应的负反馈（惩罚），Critic 会无法理解为什么高分奖励流会瞬间中断，导致预测偏差剧烈震荡。
-* **对策**：**保持奖励连续性**。在设置终止条件的同时，必须配套施加显著的负奖励（Penalty），让算法明确感知到“触发该条件是错误的”。
-
-#### 3. 任务后期摆动问题
-* **现象**：成功抓取并取出后，EE 大幅度偏转或乱动。
-* **原因**：Curriculum 中的 `joint_vel` 和 `action_rate` 惩罚介入过晚或权重过小，导致 Agent 在完成核心任务后完全无视运动的平滑性。
-```python
-# Curriculum本身是为了初期训练的流畅，在一定步数之后在增大惩罚项的权重
-@configclass
-class CurriculumCfg:
-    """Curriculum terms for the MDP."""
-    action_rate = CurrTerm(
-        func=general_mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-1, "num_steps": 10000}
-    )
-
-    joint_vel = CurrTerm(
-        func=general_mdp.modify_reward_weight, params={"term_name": "joint_vel", "weight": -1e-1, "num_steps": 10000}
-    )
-
-```
-
----
-
-### 26.1.16 | curriculum优化
-
-#### 1. 惩罚项介入时机的量化参考
-* **策略**：参考核心任务奖励（如 `pulling_object`）的曲线。
-* **逻辑**：当前期奖励达到稳定阈值（说明 Agent 已掌握抓取基本功）时，即为施加运动限制的最佳时机。
-* **计算示例**：若 `pulling_object` 在第 400 次迭代左右达标，则设置 `num_steps = 400 * num_steps_per_env`（如 $400 \times 24$）。
-
-
-#### 2. 从跳变到线性插值（Smoothing）
-* **现状**：原生的 `modify_reward_weight` 函数执行权重突变（Step Change），容易造成策略抖动。
-* **改进**：自研 `modify_reward_weight_linear` 函数。
-* **优势**：
-    * **平滑过渡**：在设定的步数区间内（如从 6000 到 20000 步）线性增加惩罚。
-    * **学习稳定性**：给 Agent 留出适应“运动限制”的时间缓冲区，避免因突然增加的惩罚导致已学到的抓取策略崩溃。
-
-![RL_26.1.16](Picture/RL_260116_01.png "RL_26.1.16")
-
+<a id="project-chaowei"></a>
 
 ## 超维动力工作总结
+
 ### PI05 归一化统计
+
+基础查阅：[动作表示与归一化](Note_Basics.md#basic-normalization)。
+
 #### 1. norm_stats 是什么
-`compute_norm_stats.py` 会输出 `norm_stats.json`，包含 `state`（机器人当前状态）和 `actions`（动作指令）两组统计量，每组 4 个值：
+
+`compute_norm_stats.py` 会输出 `norm_stats.json`，包含 `state`（机器人当前状态）和 `actions`（动作指令）两组统计量，每组4个值：
 
 | 字段 | 含义 | 计算方式 |
 |---|---|---|
 | `mean` | 均值 | 全数据加权滑动平均 |
 | `std` | 标准差 | √(E[x²] - E[x]²) |
-| `q01` | 第 1 百分位数 | 直方图近似 |
-| `q99` | 第 99 百分位数 | 直方图近似 |
+| `q01` | 第1百分位数 | 直方图近似 |
+| `q99` | 第99百分位数 | 直方图近似 |
 
-为什么需要：每个关节的角度范围相差几百倍，直接喂给模型会让 loss 和梯度被波动大的维度主导，波动小的维度信号被淹没。归一化把每个维度除以自己的标准差拉到同一尺度，让模型对每个关节同等关注。
+为什么需要：每个关节的角度范围相差几百倍，直接喂给模型会让loss和梯度被波动大的维度主导，波动小的维度信号被淹没。归一化把每个维度除以自己的标准差拉到同一尺度，让模型对每个关节同等关注。
 
 #### 2. `compute_norm_stats.py` 计算速度优化
+
 **核心优化：跳过视频解码**
 
-`compute_norm_stats` 只需要 `state` 和 `actions` 的统计量，根本用不到图像；但 v1 直接复用 `LeRobotDataset`，每次取样都会走 `_query_videos` 把对应帧的 mp4 解码出来，纯属浪费 CPU。
+`compute_norm_stats` 只需要 `state` 和 `actions` 的统计量，根本用不到图像；但v1直接复用 `LeRobotDataset`，每次取样都会走 `_query_videos` 把对应帧的mp4解码出来，纯属浪费CPU。
 
-v2 的思路是用一个子类覆盖 `_query_videos`，让它直接返回与真解码同 shape 的全零张量。下游 `RepackTransform` / `AlohaInputs` / `DeltaActions` 等 transform 看到的 dict 结构和维度跟原来完全一致，不需要任何改动；而图像本来就是 transform pipeline 的旁路，不参与 `state`/`actions` 的统计，因此 `norm_stats` 数值结果与 v1 同分布，是纯加速优化。
+v2的思路是用一个子类覆盖 `_query_videos`，让它直接返回与真解码同shape的全零张量。下游 `RepackTransform` / `AlohaInputs` / `DeltaActions` 等transform看到的dict结构和维度跟原来完全一致，不需要任何改动；而图像本来就是transform pipeline的旁路，不参与 `state`/`actions` 的统计，因此 `norm_stats` 数值结果与v1同分布，是纯加速优化。
 
-实测提速：`pico_ego_V7` 是 av1 编码、1536×2048 视频，mp4 解码极吃 CPU，v1 在 8-worker 下几乎是 CPU-bound；v2 只读 parquet，全量遍历 1500w 帧从 6–10 小时压到 1 小时以内（5–10×）。
-
+实测提速：`pico_ego_V7` 是av1编码、1536×2048视频，mp4解码极吃CPU，v1在8-worker下几乎是CPU-bound；v2只读parquet，全量遍历1500w帧从6–10小时压到1小时以内（5–10×）。
 
 ### PI0 训练流程笔记
 
-PI0 / PI0.5 / PI0.7 都是 Physical Intelligence 出的视觉-语言-动作（VLA）模型，把机器人控制建模成"条件生成"问题：给定多视角图像、语言指令和本体状态，输出未来 H 步的连续动作序列。
+PI0 / PI0.5 / PI0.7都是Physical Intelligence出的视觉-语言-动作（VLA）模型，把机器人控制建模成"条件生成"问题：给定多视角图像、语言指令和本体状态，输出未来H步的连续动作序列。
 
 #### 0. 家族总览
 
 | 模型 | 时间 | 核心改动 |
 |---|---|---|
-| PI0 | 2024.10 | PaliGemma VLM + Action Expert + Flow Matching，10K 小时同质数据 |
-| PI0-FAST | 2025 | 用 FAST tokenizer 把动作离散化成 token，走纯自回归路径 |
-| PI0.5 | 2025.04 | FAST 离散预训练 + flow matching 后训练；异构多源数据联合训练；层次化高低层推理 |
-| PI0.7 | 2026 | Steerable：多模态 prompt（subgoal 图、episode metadata）+ 知识隔离 KI |
+| PI0 | 2024.10 | PaliGemma VLM + Action Expert + Flow Matching，10K小时同质数据 |
+| PI0-FAST | 2025 | 用FAST tokenizer把动作离散化成token，走纯自回归路径 |
+| PI0.5 | 2025.04 | FAST离散预训练 + flow matching后训练；异构多源数据联合训练；层次化高低层推理 |
+| PI0.7 | 2026 | Steerable：多模态prompt（subgoal图、episode metadata）+ 知识隔离KI |
 
 #### 1. 模型架构：双专家如何与 VLM 交互
 
+基础查阅：[Attention](Note_Basics.md#basic-attention)、[Masked Attention](Note_Basics.md#basic-masked-attention)。
+
 ##### 1.1 整体结构
 
-- **Prefix 侧（VLM 专家）**：SigLIP 编码图像 → image embedding；Gemma-2B 词嵌入 → language embedding。约 2.7B 参数，从 PaliGemma 初始化。
-- **Suffix 侧（Action Expert）**：`state_proj` → 状态 embedding；`action_in_proj` + time MLP → 动作 + 时间 embedding。Gemma-300m 架构，随机初始化。
+- **Prefix侧（VLM专家）**：SigLIP编码图像 → image embedding；Gemma-2B词嵌入 → language embedding。约2.7B参数，从PaliGemma初始化。
+- **Suffix侧（Action Expert）**：`state_proj` → 状态embedding；`action_in_proj` + time MLP → 动作 + 时间embedding。Gemma-300m架构，随机初始化。
 - **输出头**：`action_out_proj` → 预测向量场 `v_t`，shape `[B, 50, action_dim]`。
 
 ##### 1.2 双专家在 Transformer 内的交互方式
 
-PI0 在**同一个 Transformer 内**用两组独立权重（类似 MoE），每一层做的事：
+PI0在**同一个Transformer内**用两组独立权重（类似MoE），每一层做的事：
 
-- **Q / K / V 投影 + FFN 各自独立**（VLM 用 PaliGemma 权重，action expert 用随机初始化的小权重）。
-- 两边的 token **拼成一条序列做联合 self-attention**——action expert 的 Q 可以查到 VLM prefix 的 K/V，把视觉语义"拉过来"。
-- attention 出来之后 FFN 各走各的。
+- **Q / K / V投影 + FFN各自独立**（VLM用PaliGemma权重，action expert用随机初始化的小权重）。
+- 两边的token **拼成一条序列做联合self-attention**——action expert的Q可以查到VLM prefix的K/V，把视觉语义"拉过来"。
+- attention出来之后FFN各走各的。
 
-**信息流向用 attention mask 控制**：
+**信息流向用attention mask控制**：
 
 | 区块 | 可看见 |
 |---|---|
-| Prefix（image + language） | 仅 Prefix（双向） |
+| Prefix（image + language） | 仅Prefix（双向） |
 | State token | Prefix + 自己 |
-| Action tokens | Prefix + state + 全部 action token（action 内部双向） |
+| Action tokens | Prefix + state + 全部action token（action内部双向） |
 
-prefix 看不到 suffix——信息**单向流向** action expert，不污染 VLM 预训练分布。这也是 prefix KV 可以缓存的原因（10 步 Euler 推理时 prefix 只算一次）。
+prefix看不到suffix——信息**单向流向** action expert，不污染VLM预训练分布。这也是prefix KV可以缓存的原因（10步Euler推理时prefix只算一次）。
 
-PI0.5 / PI0.7 沿用这个双专家骨架，但监督路径有变化：
-- **PI0.5**：VLM 同时通过 FAST 离散动作 token 的交叉熵被监督；action expert token 不去看 FAST token，避免两种动作表示泄漏。
-- **PI0.7（知识隔离 KI）**：action expert 可以 attention 访问 VLM 全部激活，但**梯度不回传到 VLM**。VLM 只由 FAST 离散交叉熵监督，避免连续 flow 损失干扰视觉语言表征。
+PI0.5 / PI0.7沿用这个双专家骨架，但监督路径有变化：
+
+- **PI0.5**：VLM同时通过FAST离散动作token的交叉熵被监督；action expert token不去看FAST token，避免两种动作表示泄漏。
+- **PI0.7（知识隔离KI）**：action expert可以attention访问VLM全部激活，但**梯度不回传到VLM**。VLM只由FAST离散交叉熵监督，避免连续flow损失干扰视觉语言表征。
 
 #### 2. Flow Matching vs Diffusion
+
+基础查阅：[Flow Matching](Note_Basics.md#basic-flow)。
 
 两者都是"从噪声生成数据"的连续生成模型，本质都在学一条把高斯分布变换到数据分布的路径，区别在路径设计：
 
 | 维度 | Diffusion (DDPM) | Flow Matching |
 |---|---|---|
 | 前向过程 | 反复加噪：`x_t = √α_t · x_0 + √(1-α_t) · ε` | 直线插值：`x_τ = τ·noise + (1-τ)·action` |
-| 学习目标 | 预测噪声 `ε` 或 score `∇log p_t` | 预测向量场 `v_τ = noise - action`（直线方向上的速度） |
+| 学习目标 | 预测噪声 `ε` 或score `∇log p_t` | 预测向量场 `v_τ = noise - action`（直线方向上的速度） |
 | 数学框架 | SDE / 马尔可夫链 | ODE / 连续归一化流 |
-| 时间步采样 | 一般均匀 | PI0 用 `Beta(1.5, 1.0)` 偏向小 τ |
-| 推理 | DDIM/DPM-Solver，20-50 步 | Euler ODE，PI0 只 10 步 |
-| 训练稳定性 | β/α 调度敏感 | 直线路径更稳，loss 更平 |
+| 时间步采样 | 一般均匀 | PI0用 `Beta(1.5, 1.0)` 偏向小 τ |
+| 推理 | DDIM/DPM-Solver，20-50步 | Euler ODE，PI0只10步 |
+| 训练稳定性 | β/α 调度敏感 | 直线路径更稳，loss更平 |
 
 ##### PI0 的具体实现
 
-构造样本（fp32 算）：
+构造样本（fp32算）：
 
 - `noise ~ N(0, I)`，`τ ~ Beta(1.5, 1.0)` 缩放到 `[0.001, 1.0]`。
 - `x_τ = τ · noise + (1 - τ) · actions`。
@@ -778,44 +115,44 @@ Loss：`L = E[||v_θ(x_τ, τ, condition) - u_τ||²]`。
 ##### PI0 选 Flow Matching 的理由
 
 - 训练目标更简单（不用复杂噪声调度）。
-- 推理快——10 步 Euler 就收敛，diffusion 一般要 20-50 步。
-- 与机器人 50Hz 控频匹配（4090 上推理 ~73ms）。
+- 推理快——10步Euler就收敛，diffusion一般要20-50步。
+- 与机器人50Hz控频匹配（4090上推理 ~73ms）。
 
 #### 3. 数据流：从观测到 loss
 
 ##### 3.1 输入
 
-> 以下以 PI0 论文默认的**双臂场景**（如 Franka 双臂 / Aloha-AgileX）为例，state/action 都是 **16 维**；不同 embodiment 维度不同，但 openpi 实现里都会被 pad 到 `max_state_dim = max_action_dim = 32` 统一进 Transformer（这也是 3.5 节输出为 `[B, 50, 32]` 的原因）。
+> 以下以PI0论文默认的**双臂场景**（如Franka双臂 / Aloha-AgileX）为例，state/action都是 **16维**；不同embodiment维度不同，但openpi实现里都会被pad到 `max_state_dim = max_action_dim = 32` 统一进Transformer（这也是3.5节输出为 `[B, 50, 32]` 的原因）。
 
 - `observation`：
-  - **图像** `[B, V, 3, 224, 224]`：V 个视角的 RGB（典型双臂配置 V=3：head + 左 wrist + 右 wrist），每张 224×224 给 SigLIP；
-  - **state** `[B, 16]`：当前本体感觉（proprioception），双臂 = 左臂 7 joint pos（关节角度，单位 rad）+ 1 gripper（开合 0/1 或归一化连续值）+ 右臂 7 joint pos + 1 gripper；
-  - **language tokens** `[B, L]`：任务指令（如 "pick up the red cup"），经 Gemma tokenizer 编码。
+  - **图像** `[B, V, 3, 224, 224]`：V个视角的RGB（典型双臂配置V=3：head + 左wrist + 右wrist），每张224×224给SigLIP；
+  - **state** `[B, 16]`：当前本体感觉（proprioception），双臂 = 左臂7 joint pos（关节角度，单位rad）+ 1 gripper（开合0/1或归一化连续值）+ 右臂7 joint pos + 1 gripper；
+  - **language tokens** `[B, L]`：任务指令（如 "pick up the red cup"），经Gemma tokenizer编码。
 
-- `actions` `[B, 50, 16]`：未来 H=50 步的 **action chunk**，每一步同样 16 维（双臂 joint + gripper）。action 一般用**绝对 joint 目标**或 **delta joint**（取决于具体配置）；gripper 维度一般是 0/1 开合或归一化连续开度。
+- `actions` `[B, 50, 16]`：未来H=50步的 **action chunk**，每一步同样16维（双臂joint + gripper）。action一般用**绝对joint目标**或 **delta joint**（取决于具体配置）；gripper维度一般是0/1开合或归一化连续开度。
 
-> 关于 16 维到 32 维的 padding：进入 `action_in_proj` 前，会把 16 维零填充到 32 维（`max_action_dim`），这样同一个 PI0 模型可以无缝吃不同 embodiment 的数据（单臂 7 维、Franka 双臂 16 维、Aloha-AgileX 14 维等），只在最后做 action 时按真实维度截断。state 也是同样的 pad 处理。
+> 关于16维到32维的padding：进入 `action_in_proj` 前，会把16维零填充到32维（`max_action_dim`），这样同一个PI0模型可以无缝吃不同embodiment的数据（单臂7维、Franka双臂16维、Aloha-AgileX 14维等），只在最后做action时按真实维度截断。state也是同样的pad处理。
 
 ##### 3.2 Prefix Embedding（图像 + 语言）
 
-- SigLIP：Conv2d patch embedding（fp32）→ 位置编码（fp32）→ cast bf16 → 12 层 Transformer → 输出 `[B, 256, dim]` bf16。
+- SigLIP：Conv2d patch embedding（fp32）→ 位置编码（fp32）→ cast bf16 → 12层Transformer → 输出 `[B, 256, dim]` bf16。
 - 语言：Gemma-2B `embed_tokens`（bf16）→ 乘 `sqrt(dim)` 缩放。
-- 拼接后 attention mask 全 0 = 双向，图像和语言互相可见。
+- 拼接后attention mask全0 = 双向，图像和语言互相可见。
 
-`patch_embedding` 和 `position_embedding` 故意保留 fp32：图像信息进入模型的第一个瓶颈，精度损失会传播到所有后续层。
+`patch_embedding` 和 `position_embedding` 故意保留fp32：图像信息进入模型的第一个瓶颈，精度损失会传播到所有后续层。
 
 ##### 3.3 Suffix Embedding（状态 + 动作 + 时间）
 
 - 状态：`state_proj = Linear(16 → width)`，fp32。
 - 时间：正弦位置编码把标量 `τ ∈ [0, 1]` 编码为高维向量。
 - 动作：`action_in_proj(x_τ pad 到 32 维)` → 与 `time_emb` 拼接 → MLP（`Linear → SiLU → Linear`）融合。
-- Suffix 内部 attention mask 为 causal：state 和 action 各 token 只能看到自身及之前的。
+- Suffix内部attention mask为causal：state和action各token只能看到自身及之前的。
 
 ##### 3.4 联合 Transformer 前向
 
-- Attention mask 结构见 1.2。
-- 双专家：每层 prefix/suffix 各算自己的 Q/K/V 后拼起来做联合 attention，FFN 各自独立。
-- 数值稳定关键算子强制 fp32：**Softmax、RoPE 三角函数、RMSNorm 方差**。bf16 下这几个算子会累积明显数值漂移。
+- Attention mask结构见1.2。
+- 双专家：每层prefix/suffix各算自己的Q/K/V后拼起来做联合attention，FFN各自独立。
+- 数值稳定关键算子强制fp32：**Softmax、RoPE三角函数、RMSNorm方差**。bf16下这几个算子会累积明显数值漂移。
 
 ##### 3.5 输出与 Loss
 
@@ -831,19 +168,19 @@ loss.backward()
 
 ##### 4.1 chunk 是什么
 
-PI0 一次预测的不是单步动作，而是未来 H=50 步序列 `A_t = [a_t, ..., a_{t+49}]`，叫 **action chunk**。控制时取前 25 步执行，然后下一次推理。
+PI0一次预测的不是单步动作，而是未来H=50步序列 `A_t = [a_t, ..., a_{t+49}]`，叫 **action chunk**。控制时取前25步执行，然后下一次推理。
 
 ##### 4.2 架构为什么能支持
 
-- Suffix 里直接放 H 个 action token，每个 `action_in_proj` 投影一个时间步的 noisy action。
-- Action 内部双向 attention，可以建模 50 步之间的时序依赖。
-- Flow matching 的向量场输出 shape 天然是 `[B, H, action_dim]`，**一次性预测整个 chunk 的速度场**，没有自回归的串行依赖。
+- Suffix里直接放H个action token，每个 `action_in_proj` 投影一个时间步的noisy action。
+- Action内部双向attention，可以建模50步之间的时序依赖。
+- Flow matching的向量场输出shape天然是 `[B, H, action_dim]`，**一次性预测整个chunk的速度场**，没有自回归的串行依赖。
 
-对比 OpenVLA：走自回归离散 token，每个时间步都要解一个 token，输出 50 步动作需要 50 次串行 decode，无法满足 50Hz 控频。PI0 论文里 OpenVLA 在灵巧任务上"几乎完全失败"就是这个原因。
+对比OpenVLA：走自回归离散token，每个时间步都要解一个token，输出50步动作需要50次串行decode，无法满足50Hz控频。PI0论文里OpenVLA在灵巧任务上"几乎完全失败"就是这个原因。
 
 ##### 4.3 推理：10 步 Euler ODE
 
-从纯噪声 `x ~ N(0, I)`（`τ=1`）出发，分 10 步沿向量场走回 `τ=0`：
+从纯噪声 `x ~ N(0, I)`（`τ=1`）出发，分10步沿向量场走回 `τ=0`：
 
 ```
 for step in range(10):
@@ -851,84 +188,85 @@ for step in range(10):
     τ -= dt
 ```
 
-之所以 10 步够：
-- Flow matching 直线路径收敛快。
-- Prefix KV 可缓存，只算一次；10 步只重复算 suffix 的 attention/FFN。
-- 4090 上总耗时 ~73ms（图像编码 14ms + 观测 forward 32ms + 10 步去噪 27ms）。
+之所以10步够：
+
+- Flow matching直线路径收敛快。
+- Prefix KV可缓存，只算一次；10步只重复算suffix的attention/FFN。
+- 4090上总耗时 ~73ms（图像编码14ms + 观测forward 32ms + 10步去噪27ms）。
 
 #### 5. State 表示的两种正交选择
 
-PI 系列里 state 字段有两个完全独立的维度可以调，**不要把它们搞混**：
+PI系列里state字段有两个完全独立的维度可以调，**不要把它们搞混**：
 
 ##### 5.1 编码方式：`discrete_state_input`
 
-控制 **state 怎么进模型**：
+控制 **state怎么进模型**：
 
-- `discrete_state_input=True`（PI0.5 默认）：state 走**文本 token 路径**。tokenizer 把 state 离散化成整数序列拼到 prompt 文本，例如 `Task: xxx, State: 12 87 200 ...; Action:`，跟 task 一起走 VLM bidirectional attention。
-- `discrete_state_input=False`（PI0 默认）：state 走**连续向量路径**。经过 `state_proj` 线性投影变成连续 token 拼到 action expert 的 suffix 里。
+- `discrete_state_input=True`（PI0.5默认）：state走**文本token路径**。tokenizer把state离散化成整数序列拼到prompt文本，例如 `Task: xxx, State: 12 87 200 ...; Action:`，跟task一起走VLM bidirectional attention。
+- `discrete_state_input=False`（PI0默认）：state走**连续向量路径**。经过 `state_proj` 线性投影变成连续token拼到action expert的suffix里。
 
-实际工程里 `pi05_pico` 当前是 `pi05=True` + `discrete_state_input=False`，这是非默认组合——骨架是 PI0.5，但 state 走 PI0 风格连续投影。
+实际工程里 `pi05_pico` 当前是 `pi05=True` + `discrete_state_input=False`，这是非默认组合——骨架是PI0.5，但state走PI0风格连续投影。
 
 ##### 5.2 内容语义：state 字段里装什么
 
-控制 **state 字段里放什么数**，与编码方式无关：
+控制 **state字段里放什么数**，与编码方式无关：
 
-- 当前 proprioception（标准）：state[t] = 当前关节角度。
+- 当前proprioception（标准）：state[t] = 当前关节角度。
 - `action[t-1]`（变体）：state[t] = 上一帧的动作指令。
 
 ##### 5.3 两个维度可任意组合
 
-| state 内容 | state 编码 | 说明 |
+| state内容 | state编码 | 说明 |
 |---|---|---|
-| 当前 proprioception | 离散文本 token | PI0.5 标准组合 |
-| 当前 proprioception | 连续投影 | PI0 / 当前 pi05_pico |
-| `action[t-1]` | 离散文本 token | 变体 A |
-| `action[t-1]` | 连续投影 | 变体 B |
+| 当前proprioception | 离散文本token | PI0.5标准组合 |
+| 当前proprioception | 连续投影 | PI0 / 当前pi05_pico |
+| `action[t-1]` | 离散文本token | 变体A |
+| `action[t-1]` | 连续投影 | 变体B |
 
-要把 state 改成 `action[t-1]`，**正确做法是改数据侧**，不是动 `discrete_state_input`：
+要把state改成 `action[t-1]`，**正确做法是改数据侧**，不是动 `discrete_state_input`：
 
-- 在数据 transform 链路加一步 `RepackTransform` 或自定义 transform，在 LeRobot dataset 层面或 `LeRobotPicoEgoDataConfig` 的 `repack_transforms` 里替换 `state` 字段。
-- 首帧没有 `t-1`，用零向量或第 0 帧 action 自身填充。
-- **`norm_stats` 必须同步替换**：原来 state 和 action 各有 mean/std；改成 action 分布后必须用 action 的 norm stats 给替换后的 state 归一化，否则模型看到的输入分布偏移。
+- 在数据transform链路加一步 `RepackTransform` 或自定义transform，在LeRobot dataset层面或 `LeRobotPicoEgoDataConfig` 的 `repack_transforms` 里替换 `state` 字段。
+- 首帧没有 `t-1`，用零向量或第0帧action自身填充。
+- **`norm_stats` 必须同步替换**：原来state和action各有mean/std；改成action分布后必须用action的norm stats给替换后的state归一化，否则模型看到的输入分布偏移。
 
-一句话：`discrete_state_input` 改的是"state 张量怎么进模型"，"上一帧 action 当 state"改的是"state 张量里放什么数"，两者正交不互相替代。
+一句话：`discrete_state_input` 改的是"state张量怎么进模型"，"上一帧action当state"改的是"state张量里放什么数"，两者正交不互相替代。
 
 #### 6. PI0-FAST：动作离散化 Tokenizer
 
-PI0 用 flow matching 输出连续动作；PI0-FAST 走另一条路——把动作变成离散 token，让自回归 VLM 直接预测。
+PI0用flow matching输出连续动作；PI0-FAST走另一条路——把动作变成离散token，让自回归VLM直接预测。
 
 ##### 6.1 为什么不能直接对动作做 BPE
 
-机器人动作在时域上**高度相关**（手臂位置变化平滑），直接 BPE 会得到极长的低熵 token 序列，浪费上下文。
+机器人动作在时域上**高度相关**（手臂位置变化平滑），直接BPE会得到极长的低熵token序列，浪费上下文。
 
 ##### 6.2 FAST 的两步压缩
 
-1. **DCT 频域转换**：对一段动作做**离散余弦变换（Discrete Cosine Transform）**，把时序信号从时域转到频域。机器人动作的高频分量很小，可以直接丢掉只保留低频系数。
-2. **BPE 字节对编码**：对剩下的低频系数做 BPE，得到有限的"动作词表"——类似 LLM 词表，每个 token 代表一段动作的某种"模式"。
+1. **DCT频域转换**：对一段动作做**离散余弦变换（Discrete Cosine Transform）**，把时序信号从时域转到频域。机器人动作的高频分量很小，可以直接丢掉只保留低频系数。
+2. **BPE字节对编码**：对剩下的低频系数做BPE，得到有限的"动作词表"——类似LLM词表，每个token代表一段动作的某种"模式"。
 
 ##### 6.3 在 PI0.5 / PI0.7 中的作用
 
-PI0.5 同时训练两种动作预测路径，联合 loss：
+PI0.5同时训练两种动作预测路径，联合loss：
 
 `L = H(FAST_tokens) + α · ||v_θ - u_τ||²`
 
-- 预训练阶段 `α=0`，只用 FAST 离散监督，训练效率高、适合大规模异构数据。
-- 后训练阶段 `α=10`，启用 action expert + flow matching，精度高、推理快。
+- 预训练阶段 `α=0`，只用FAST离散监督，训练效率高、适合大规模异构数据。
+- 后训练阶段 `α=10`，启用action expert + flow matching，精度高、推理快。
 
-PI0.7 把这种"FAST 监督 VLM + flow matching 监督 action expert"做成永久的双轨结构（即 KI），并且 VLM 梯度不被 action expert 污染。
+PI0.7把这种"FAST监督VLM + flow matching监督action expert"做成永久的双轨结构（即KI），并且VLM梯度不被action expert污染。
 
 #### 7. 训练工程细节
 
 ##### 7.1 梯度裁剪 + AdamW
 
-- `clip_grad_norm_`：全局 L2 范数超过 `max_norm=1.0` 时等比例缩小。
+- `clip_grad_norm_`：全局L2范数超过 `max_norm=1.0` 时等比例缩小。
 - AdamW：`β1=0.9, β2=0.95, ε=1e-8, wd=1e-10`。
 
-精度影响：bf16 参数下 m/v 只有 2-3 位有效数字，`lr=2.5e-5` 时微小更新会被吞掉（`1.0 + 2.5e-7 = 1.0`）；fp32 下更新正确保留（`1.0 + 2.5e-7 = 1.00000025`）。所以**优化器状态必须 fp32**，参数可以 bf16 + master copy fp32。
+精度影响：bf16参数下m/v只有2-3位有效数字，`lr=2.5e-5` 时微小更新会被吞掉（`1.0 + 2.5e-7 = 1.0`）；fp32下更新正确保留（`1.0 + 2.5e-7 = 1.00000025`）。所以**优化器状态必须fp32**，参数可以bf16 + master copy fp32。
 
 ##### 7.2 学习率调度
 
-前 1000 步线性 warmup 到 `peak_lr=2.5e-5`，之后 cosine decay 到 `end_lr=2.5e-6`。
+前1000步线性warmup到 `peak_lr=2.5e-5`，之后cosine decay到 `end_lr=2.5e-6`。
 
 ##### 7.3 JAX 显存：XLA 环境变量
 
@@ -937,7 +275,7 @@ PI0.7 把这种"FAST 监督 VLM + flow matching 监督 action expert"做成永�
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 ```
 
-`platform` 模式是"用多少分配多少"会有波动，跟 `MEM_FRACTION=0.9` 的预分配冲突，导致 0.9 不生效。统一只设 `MEM_FRACTION=0.9` 预先分配，行为更稳定。
+`platform` 模式是"用多少分配多少"会有波动，跟 `MEM_FRACTION=0.9` 的预分配冲突，导致0.9不生效。统一只设 `MEM_FRACTION=0.9` 预先分配，行为更稳定。
 
 #### 8. 完整数据流图
 
@@ -959,68 +297,71 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
 | 维度 | PI0 | PI0.5 |
 |---|---|---|
-| 训练数据 | 10K 小时同质遥操作 + OXE | 异构联合训练：MM + ME + CE + HL（高层标注）+ WD（网络数据）+ VI（口头指令），97.6% 数据不来自目标平台 |
-| 训练阶段 | 单阶段：预训练 → 后训练 | 两阶段：FAST 离散 token 自回归预训练 → 加入 action expert + flow matching 后训练 |
-| 推理范式 | 一次给出 action chunk | 层次化：同一模型先输出子任务文本（"拿起盘子"），再基于子任务输出动作 |
-| State 默认编码 | 连续投影（`discrete_state_input=False`） | 离散文本 token（`discrete_state_input=True`） |
-| 泛化能力 | 任务级泛化（同环境） | 开放世界泛化：在**全新真实家庭**完成 10-15 分钟清洁任务 |
+| 训练数据 | 10K小时同质遥操作 + OXE | 异构联合训练：MM + ME + CE + HL（高层标注）+ WD（网络数据）+ VI（口头指令），97.6% 数据不来自目标平台 |
+| 训练阶段 | 单阶段：预训练 → 后训练 | 两阶段：FAST离散token自回归预训练 → 加入action expert + flow matching后训练 |
+| 推理范式 | 一次给出action chunk | 层次化：同一模型先输出子任务文本（"拿起盘子"），再基于子任务输出动作 |
+| State默认编码 | 连续投影（`discrete_state_input=False`） | 离散文本token（`discrete_state_input=True`） |
+| 泛化能力 | 任务级泛化（同环境） | 开放世界泛化：在**全新真实家庭**完成10-15分钟清洁任务 |
 
-核心 take-away：PI0.5 把 VLA 重新定义成一个**同时能输出文本（子任务、FAST 动作 token）和连续动作（flow matching）的统一模型**，靠异构数据联合训练 + 层次化推理实现开放世界泛化。
+核心take-away：PI0.5把VLA重新定义成一个**同时能输出文本（子任务、FAST动作token）和连续动作（flow matching）的统一模型**，靠异构数据联合训练 + 层次化推理实现开放世界泛化。
 
 #### 10. PI0.7 相对前作的不同
 
-关键词是 **Steerable**——同一个通用模型可以通过 prompt 精确控制"怎么做"。
+关键词是 **Steerable**——同一个通用模型可以通过prompt精确控制"怎么做"。
 
 ##### 10.1 架构变化
 
-- VLM 骨干升级到 Gemma-3 4B + 400M 视觉编码器。
-- 新增 **MEM 视频历史编码器**：最多 4 个摄像头 × 6 帧历史时空压缩成固定数量 token。
-- Action expert 扩到 860M（PI0/PI0.5 是 300M）。
-- 总参数约 5B。
+- VLM骨干升级到Gemma-3 4B + 400M视觉编码器。
+- 新增 **MEM视频历史编码器**：最多4个摄像头 × 6帧历史时空压缩成固定数量token。
+- Action expert扩到860M（PI0/PI0.5是300M）。
+- 总参数约5B。
 
 ##### 10.2 核心创新：多模态 Prompt
 
-除语言指令外，prompt 还可包含：
+除语言指令外，prompt还可包含：
 
 - **子任务指令** `ℓ̂_t`：当前要做的语义子任务文本。
-- **子目标图像** `g_t`：BAGEL 14B 世界模型生成的近未来期望状态图像，专门解决"语言描述不清楚视觉细节"的问题。
-- **Episode metadata**：速度（离散化步数）、质量（1-5 分）、错误标签、控制模式。**这是 steerable 的核心抓手**——训练时给真实标签，推理时设为"最高质量/最快速度/无错误"来引导模型输出最优行为。
+- **子目标图像** `g_t`：BAGEL 14B世界模型生成的近未来期望状态图像，专门解决"语言描述不清楚视觉细节"的问题。
+- **Episode metadata**：速度（离散化步数）、质量（1-5分）、错误标签、控制模式。**这是steerable的核心抓手**——训练时给真实标签，推理时设为"最高质量/最快速度/无错误"来引导模型输出最优行为。
 
-训练时各组件随机 dropout（subgoal 75%、metadata 15%、子任务 30%），让模型推理时可以灵活使用任意子集。
+训练时各组件随机dropout（subgoal 75%、metadata 15%、子任务30%），让模型推理时可以灵活使用任意子集。
 
 ##### 10.3 知识隔离（KI）
 
-VLM 只由 FAST token 的离散交叉熵监督，action expert 可以 attention 访问 VLM 的全部激活，但**梯度不回传到 VLM**。VLM 训练更稳定，避免连续 flow loss 干扰视觉语言表征。
+VLM只由FAST token的离散交叉熵监督，action expert可以attention访问VLM的全部激活，但**梯度不回传到VLM**。VLM训练更稳定，避免连续flow loss干扰视觉语言表征。
 
 ##### 10.4 涌现能力
 
-- **跨构型零样本迁移**：BiPi → UR5e 折 T 恤，80% 成功率，匹配顶级人类遥操作员。
-- **组合泛化**：通过语言 coaching 完成训练中从未见过的任务（空气炸锅、压面壶等）。
-- **混合质量数据的 scaling**：去掉 metadata 时加更多数据反而性能下降；有 metadata 时持续提升——证明 metadata 条件化解锁了数据规模的 scaling 效应。
+- **跨构型零样本迁移**：BiPi → UR5e折T恤，80% 成功率，匹配顶级人类遥操作员。
+- **组合泛化**：通过语言coaching完成训练中从未见过的任务（空气炸锅、压面壶等）。
+- **混合质量数据的scaling**：去掉metadata时加更多数据反而性能下降；有metadata时持续提升——证明metadata条件化解锁了数据规模的scaling效应。
 
 ##### 10.5 PI0 → PI0.5 → PI0.7 内在逻辑
 
 | 维度 | PI0 | PI0.5 | PI0.7 |
 |---|---|---|---|
-| 解决的核心问题 | 灵巧操作的高频动作生成 | 开放世界场景泛化 | 多策略 steerable 控制 |
-| 数据策略 | 高质量同质遥操作 | 异构多源（含网络数据） | 混合质量 + metadata 条件化 |
-| Prompt | 语言指令 | 语言 + 自动生成子任务 | 语言 + 子任务 + subgoal 图 + metadata |
-| 关键设计 | Flow matching + 双专家 | FAST 预训练 + 层次化推理 | Episode metadata + 知识隔离 |
+| 解决的核心问题 | 灵巧操作的高频动作生成 | 开放世界场景泛化 | 多策略steerable控制 |
+| 数据策略 | 高质量同质遥操作 | 异构多源（含网络数据） | 混合质量 + metadata条件化 |
+| Prompt | 语言指令 | 语言 + 自动生成子任务 | 语言 + 子任务 + subgoal图 + metadata |
+| 关键设计 | Flow matching + 双专家 | FAST预训练 + 层次化推理 | Episode metadata + 知识隔离 |
 
 ### pico ego pipeline
 
-把 PICO 头显采集的第一人称视角原始数据（视频 + tracking + 片段标注）转换成 **LeRobot v2.1** 数据集，用于 VLA 模型（pi0.5）预训练。
+完整处理流程见[数据处理：超维Pico](Note_DataPipeline.md#data-chaowei)，包括时间匹配、曲率gripper、质量分级和标签语义。
+
+把PICO头显采集的第一人称视角原始数据（视频 + tracking + 片段标注）转换成 **LeRobot v2.1** 数据集，用于VLA模型（pi0.5）预训练。
 
 #### 输入与输出
 
 **输入**：每个采集会话目录包含
+
 - `CameraRecord_*.mp4`：原始头显视频
-- `trackingData_*.txt`：JSON Lines 格式的手部追踪
+- `trackingData_*.txt`：JSON Lines格式的手部追踪
 - `camera_params*.json`：相机内参 + 畸变参数
-- `*_segments_description.json`：人工标注的片段（skill、interacting_hand、target_object 等）
+- `*_segments_description.json`：人工标注的片段（skill、interacting_hand、target_object等）
 - `quality_inspection.json`：质检报告（可选）
 
-**输出**：标准 LeRobot 数据集（`data/` / `videos/` / `meta/`），`observation.state` 与 `action` 均为 **20D**（每只手 `xyz(3) + 6D rotation(6) + gripper(1) = 10D`，6D 旋转用 Zhou et al. 2019 的"旋转矩阵前两列展平"）。
+**输出**：标准LeRobot数据集（`data/` / `videos/` / `meta/`），`observation.state` 与 `action` 均为 **20D**（每只手 `xyz(3) + 6D rotation(6) + gripper(1) = 10D`，6D旋转用Zhou et al. 2019的"旋转矩阵前两列展平"）。
 
 #### 流水线步骤
 
@@ -1028,54 +369,53 @@ VLM 只由 FAST token 的离散交叉熵监督，action expert 可以 attention 
 
 | 步 | 内容 | 脚本 |
 |---|---|---|
-| **Q** | 质量过滤（硬过滤 + 软评分 0~5）；硬过滤未通过直接跳过 | `quality_filter.py` |
-| **0** | 修正 tracking 时间戳（补偿管线延迟 140ms） | `00_correct_tracking_time.py` |
+| **Q** | 质量过滤（硬过滤 + 软评分0~5）；硬过滤未通过直接跳过 | `quality_filter.py` |
+| **0** | 修正tracking时间戳（补偿管线延迟140ms） | `00_correct_tracking_time.py` |
 | **1** | 并行：① tracking TXT → HDF5（只保留左右手）；② 视频去畸变 | `01_trackingdata_to_hdf5.py` / `01_video_undistort.py` |
-| **2** | 按标注切分 episodes：视频段 + 动作 H5，可选帧率转换（如 25→30fps，`setpts=N/fps/TB -bf 0`） | `02_video_hdf5_segment.py` |
-| **3** | H5 → Parquet：构造 20D state/action（xyz+6D rot+gripper），同时生成 `tasks.jsonl` | `03_hdf5_to_parquet.py` |
-| **4** | 并行：① 整理 LeRobot `data/`；② 整理 LeRobot `videos/`（仅复制重组，不重编码） | `04_lerobot_data_generate.py` / `04_lerobot_video_generate.py` |
-| **5** | 生成 LeRobot `meta/`（info.json、stats、episodes.jsonl、tasks.jsonl 等） | `04_lerobot_meta_generate.py` |
-| **6**（可选） | `--auto-merge` 合并所有单会话数据集到 `_merged/`，**视频用 symlink** 节省空间 | `05_merge_lerobot_datasets.py` |
+| **2** | 按标注切分episodes：视频段 + 动作H5，可选帧率转换（如25→30fps，`setpts=N/fps/TB -bf 0`） | `02_video_hdf5_segment.py` |
+| **3** | H5 → Parquet：构造20D state/action（xyz+6D rot+gripper），同时生成 `tasks.jsonl` | `03_hdf5_to_parquet.py` |
+| **4** | 并行：① 整理LeRobot `data/`；② 整理LeRobot `videos/`（仅复制重组，不重编码） | `04_lerobot_data_generate.py` / `04_lerobot_video_generate.py` |
+| **5** | 生成LeRobot `meta/`（info.json、stats、episodes.jsonl、tasks.jsonl等） | `04_lerobot_meta_generate.py` |
+| **6**（可选） | `--auto-merge` 合并所有单会话数据集到 `_merged/`，**视频用symlink** 节省空间 | `05_merge_lerobot_datasets.py` |
 
 #### 质量过滤的两层设计
 
 1. **硬过滤**：任一命中直接淘汰
    - 相机标定无效（去畸变会崩）
    - 视频 < 5s（切分后没意义）
-   - 视频-tracking 时长比偏离 `[0.9, 1.1]`（同步出问题）
-   - 双手 missing ratio 都 > 90%
-   - 语义噪声里有 invalid 段
-   - 关节 ROM 违规 > 100 帧
+   - 视频-tracking时长比偏离 `[0.9, 1.1]`（同步出问题）
+   - 双手missing ratio都 > 90%
+   - 语义噪声里有invalid段
+   - 关节ROM违规 > 100帧
 
-2. **软评分**：从视觉 / 动作 / 时序 / 内容四个维度打 0~100 分 → 映射到 0~5 的 quality 数值，写入 `task_prompt` 前缀：
+2. **软评分**：从视觉 / 动作 / 时序 / 内容四个维度打0~100分 → 映射到0~5的quality数值，写入 `task_prompt` 前缀：
 
    `quality: 5; skill: Hover; hand: both; target_object: shelf; type: human; <原始描述>`
 
-   下游训练时可按 quality 筛选/加权（pi0.7 那种 multimodal prompting 的思路）。
+   下游训练时可按quality筛选/加权（pi0.7那种multimodal prompting的思路）。
 
 #### 关键设计点
 
-- **20D action 维度** 是为了对齐 VLA 输入；6D rotation 而非欧拉/四元数，避免不连续性。
-- **视频帧率统一在 Step 2 完成**，Step 4 不再重编码，避免重复 transcoding 损失质量。
+- **20D action维度** 是为了对齐VLA输入；6D rotation而非欧拉/四元数，避免不连续性。
+- **视频帧率统一在Step 2完成**，Step 4不再重编码，避免重复transcoding损失质量。
 - **中间产物（`_middle/` 与 `_segments/`）默认结束清理**，`--debug` 保留方便排查。
-- **OSS FUSE 写视频问题**：所有 ffmpeg / cv2.VideoWriter 输出必须先写本地 FS 再 `cp`，已封装在 `staged_writer`（见上节）。
-- **并行**：单会话内 Step 1 / Step 4 并行；多会话之间用 `--workers` 控制 ThreadPoolExecutor。
-
+- **OSS FUSE写视频问题**：所有ffmpeg / cv2.VideoWriter输出必须先写本地FS再 `cp`，已封装在 `staged_writer`（见上节）。
+- **并行**：单会话内Step 1 / Step 4并行；多会话之间用 `--workers` 控制ThreadPoolExecutor。
 
 ### 基于 OpenPI 0.5 开发两套 Policy：Egocentric 与 UMI/遥操
 
-为了让 Pico 第一视角数据和松灵双臂的 UMI/遥操数据共用同一个 π0.5 模型，开发了 `pi05_pico` 和 `pi05_kaiumi` 两套 policy。**核心原则**：π0.5 backbone 与 base checkpoint 完全共享，差异只放在 policy 的 input/output transform 层——让两种数据用同一份权重起步，方便阶段式迁移（pico pretrain → kaiumi midtrain → 遥操 posttrain）。
+为了让Pico第一视角数据和松灵双臂的UMI/遥操数据共用同一个 π0.5模型，开发了 `pi05_pico` 和 `pi05_kaiumi` 两套policy。**核心原则**：π0.5 backbone与base checkpoint完全共享，差异只放在policy的input/output transform层——让两种数据用同一份权重起步，方便阶段式迁移（pico pretrain → kaiumi midtrain → 遥操posttrain）。
 
 #### 1. 两套 Policy 对照
 
 | 维度 | `pi05_pico` | `pi05_kaiumi` |
 |---|---|---|
-| 数据来源 | Pico VR 头显第一视角 | 松灵双臂 UMI 采集 / 遥操 |
-| state/action 维度 | **20D**：(3 xyz + 6 6D-rot + 1 gripper) × 2 手 | **14D**：(6 joint + 1 gripper) × 2 手 |
-| 动作空间 | 末端位姿（手部 tracking 解出） | 关节角度 |
-| 相机 | 仅 `cam_high`（单目第一视角） | `cam_high` + 双 wrist（三相机全启用） |
+| 数据来源 | Pico VR头显第一视角 | 松灵双臂UMI采集 / 遥操 |
+| state/action维度 | **20D**：(3 xyz + 6 6D-rot + 1 gripper) × 2手 | **14D**：(6 joint + 1 gripper) × 2手 |
+| 动作空间 | 末端位姿（手部tracking解出） | 关节角度 |
+| 相机 | 仅 `cam_high`（单目第一视角） | `cam_high` + 双wrist（三相机全启用） |
 | delta mask | `(3, -7, 3, -7)`：xyz delta，rot/gripper absolute | `(6, -1, 6, -1)`：joint delta，gripper absolute |
-| Inputs/Outputs | `PicoEgoInputs/Outputs`（新写） | `AlohaInputs/Outputs`（直接复用 aloha_policy） |
+| Inputs/Outputs | `PicoEgoInputs/Outputs`（新写） | `AlohaInputs/Outputs`（直接复用aloha_policy） |
 | `adapt_to_pi` | — | `True` |
 
 #### 2. 共同的模型骨架
@@ -1091,105 +431,110 @@ Pi0Config(
 # 都用 PI05_BASE_CHECKPOINT_PATH 起步 + CosineDecaySchedule + ema_decay=None
 ```
 
-`discrete_state_input=False` 是**非 PI0.5 默认**的组合——骨架是 PI0.5，但 state 走 PI0 的连续 `state_proj`。原因是 Pico 的末端位姿和 UMI 的关节角度都是连续物理量，离散 tokenize 反而失真。
+`discrete_state_input=False` 是**非PI0.5默认**的组合——骨架是PI0.5，但state走PI0的连续 `state_proj`。原因是Pico的末端位姿和UMI的关节角度都是连续物理量，离散tokenize反而失真。
 
 #### 3. Pico Ego 的两个关键设计点
 
-**(1) 单目兼容三相机 base ckpt**（最有意思的工程取舍）：base 是按 3 相机训的，但 Pico 只有第一视角。直接改模型结构会破坏 base 权重，所以走 mask 路线——把两路 wrist 用零图填充，对应 `image_mask` 设为 `False`，attention 自动忽略这两路。base ckpt 完全不动就能吃单目数据。
+**(1) 单目兼容三相机base ckpt**（最有意思的工程取舍）：base是按3相机训的，但Pico只有第一视角。直接改模型结构会破坏base权重，所以走mask路线——把两路wrist用零图填充，对应 `image_mask` 设为 `False`，attention自动忽略这两路。base ckpt完全不动就能吃单目数据。
 
-**(2) 旋转选 6D + absolute，xyz 选 delta**：xyz 是欧氏空间的平移量，delta 物理上就是位移，最好学；旋转用 6D（连续可微无双覆盖）+ absolute（绕开 SO(3) 上 delta 怎么定义的坑）。这套维度选择是踩了"四元数 + 全 delta"的坑之后定下来的，详见下方"遇到的问题 #2"。
+**(2) 旋转选6D + absolute，xyz选delta**：xyz是欧氏空间的平移量，delta物理上就是位移，最好学；旋转用6D（连续可微无双覆盖）+ absolute（绕开SO(3) 上delta怎么定义的坑）。这套维度选择是踩了"四元数 + 全delta"的坑之后定下来的，详见下方"遇到的问题 #2"。
 
 #### 4. KaiUmi 的设计：直接复用 Aloha 接口
 
-松灵双臂的形态（6-DoF + gripper × 2 = 14D）和 Aloha 完全一致，所以 `kaiumi_policy.py` 直接派生自 `aloha_policy.py`，保留 `adapt_to_pi=True`：
+松灵双臂的形态（6-DoF + gripper × 2 = 14D）和Aloha完全一致，所以 `kaiumi_policy.py` 直接派生自 `aloha_policy.py`，保留 `adapt_to_pi=True`：
 
-- `_joint_flip_mask`：把 Aloha joint 约定翻成 π0 内部约定（部分 joint 符号反转）；
-- `_gripper_to/from_angular`：Aloha gripper 是线性归一化（米），π0 是角度归一化（弧度），双向换算来自 Interbotix datasheet。
+- `_joint_flip_mask`：把Aloha joint约定翻成 π0内部约定（部分joint符号反转）；
+- `_gripper_to/from_angular`：Aloha gripper是线性归一化（米），π0是角度归一化（弧度），双向换算来自Interbotix datasheet。
 
-inputs 做正向（数据集 → 模型），outputs 做逆向（模型 → 真机）。三相机和 base ckpt 完全对齐，无需任何 trick。
+inputs做正向（数据集 → 模型），outputs做逆向（模型 → 真机）。三相机和base ckpt完全对齐，无需任何trick。
 
 #### 5. 关键设计要点速查
 
 | 设计点 | 选择 | 一句话原因 |
 |---|---|---|
-| 模型架构 | 完全共享 π0.5 backbone | base ckpt 复用 + 阶段式迁移 |
-| state 编码 | 连续投影（非默认） | 连续物理量，离散化反而失真 |
-| Pico 单目 | 零图 + image_mask=False | 不改模型结构兼容三相机 ckpt |
-| 旋转表示 | 6D rotation + absolute | 连续可微 + 绕开 SO(3) delta（详见踩坑 #2） |
-| LoRA / 全参 | `USE_LORA` 环境变量切换 | LoRA 节省显存适合小数据 |
-| EMA | `ema_decay=None` | 微调阶段 EMA 收益有限 |
-
+| 模型架构 | 完全共享 π0.5 backbone | base ckpt复用 + 阶段式迁移 |
+| state编码 | 连续投影（非默认） | 连续物理量，离散化反而失真 |
+| Pico单目 | 零图 + image_mask=False | 不改模型结构兼容三相机ckpt |
+| 旋转表示 | 6D rotation + absolute | 连续可微 + 绕开SO(3) delta（详见踩坑 #2） |
+| LoRA / 全参 | `USE_LORA` 环境变量切换 | LoRA节省显存适合小数据 |
+| EMA | `ema_decay=None` | 微调阶段EMA收益有限 |
 
 ### 遇到的问题以及一些细节
 
 #### 1. OSS FUSE 写 MP4 时 moov atom 丢失
 
-- 问题现象：用 ffmpeg 或 cv2.VideoWriter 把 mp4 直接写到 OSS FUSE 挂载路径（`/mnt/pico_data`）时，文件能写出但 ffprobe 报 moov 缺失、播放器打不开，典型报错 `Error writing trailer: Invalid argument`。
+- 问题现象：用ffmpeg或cv2.VideoWriter把mp4直接写到OSS FUSE挂载路径（`/mnt/pico_data`）时，文件能写出但ffprobe报moov缺失、播放器打不开，典型报错 `Error writing trailer: Invalid argument`。
 
-- 原因：MP4 文件由两个核心 atom 组成——`mdat` 存编码数据（编码过程中顺序追加），`moov` 存每帧偏移和编解码参数等索引（必须等所有帧编完才能算出）。主流 muxer 的标准流程是先占位写 `mdat`，结束时构造 `moov` 写到文件尾，再 seek 回头把 `moov` 搬到文件首部做 faststart 重排，方便边下边播。而 OSS 对象存储本身不可变（PutObject 是原子全量写），ossfs2 用 multipart upload 模拟追加，只支持顺序 append 和顺序 read，不支持回头改写已写过的偏移。所以一旦 muxer 在 close 时做 faststart 重排，那一刻就必然失败。
+- 原因：MP4文件由两个核心atom组成——`mdat` 存编码数据（编码过程中顺序追加），`moov` 存每帧偏移和编解码参数等索引（必须等所有帧编完才能算出）。主流muxer的标准流程是先占位写 `mdat`，结束时构造 `moov` 写到文件尾，再seek回头把 `moov` 搬到文件首部做faststart重排，方便边下边播。而OSS对象存储本身不可变（PutObject是原子全量写），ossfs2用multipart upload模拟追加，只支持顺序append和顺序read，不支持回头改写已写过的偏移。所以一旦muxer在close时做faststart重排，那一刻就必然失败。
 
-- 解决方案：用 staged writer 模式，让 seek 发生在本地 FS 上，写完整后再一次性顺序传到 OSS。即 encoder 先把完整 mp4 写到本地高速 FS（tmpfs 或 CPFS），再用 `cp` 顺序复制到 OSS FUSE。`cp` 对 OSS FUSE 来说就是把整个文件作为一次 multipart upload 写出，全程顺序无 seek，因此能成功。项目里统一封装在 `python/staged_writer.staged_oss_output`（context manager），face_blur、VideoSplitRefiner 等所有写 mp4 的 refiner 都套这个 wrapper。
+- 解决方案：用staged writer模式，让seek发生在本地FS上，写完整后再一次性顺序传到OSS。即encoder先把完整mp4写到本地高速FS（tmpfs或CPFS），再用 `cp` 顺序复制到OSS FUSE。`cp` 对OSS FUSE来说就是把整个文件作为一次multipart upload写出，全程顺序无seek，因此能成功。项目里统一封装在 `python/staged_writer.staged_oss_output`（context manager），face_blur、VideoSplitRefiner等所有写mp4的refiner都套这个wrapper。
 
 #### 2. Pico action 表示踩坑：从「四元数 + 全 delta」到「6D rotation + xyz delta + 旋转 absolute」
 
-- 问题现象：Pico ego policy 最初版本用 `xyz (3) + 四元数 (4) + gripper (1) = 8D` 作为单手动作表示，并且 **xyz、四元数都做 delta**。训练时旋转维度 loss 长期不下降、推理时手部姿态明显抖动甚至跳变，xyz 维度反而正常。
+基础查阅：[旋转表示与相对位姿](Note_Basics.md#basic-rotation)。
+
+- 问题现象：Pico ego policy最初版本用 `xyz (3) + 四元数 (4) + gripper (1) = 8D` 作为单手动作表示，并且 **xyz、四元数都做delta**。训练时旋转维度loss长期不下降、推理时手部姿态明显抖动甚至跳变，xyz维度反而正常。
 
 - 原因（两个独立但叠加的问题）：
 
-  - **四元数双覆盖（±q 表示同一旋转）**：单位四元数 `q` 和 `-q` 几何上代表同一个旋转，但欧氏数值上差了一倍模长。Pico 头显的手部 tracking 在相邻帧偶尔会输出符号翻转的 q（解算时挑了相反的半球），如果直接 `Δq = q_t - q_{t-1}`，正常情况下是接近 0 的小向量，符号翻转那帧就会突然变成一个 |Δq| ≈ 2 的"伪大旋转"。训练数据里混了这种**完全虚假的大目标**，模型既学不到真规律，也压不住梯度。
-  - **四元数 delta 在欧氏空间没几何意义**：真正的"旋转之差"在 SO(3) 上应该用 `R_delta = R_t · R_{t-1}^T` 然后取 log map（转成轴角向量）才有意义；直接对四元数做欧氏减法既不是旋转增量，加回去之后单位长度也不再为 1，必须额外归一化，又会引入二次误差。所以**"四元数 + delta"这条路从原理上就走不通**。
-  - 附加问题：相比 xyz 这种本来就在欧氏空间的物理量，旋转 delta 对模型来说还要额外学一个非线性流形上的减法操作，难度更高。
+  - **四元数双覆盖（±q表示同一旋转）**：单位四元数 `q` 和 `-q` 几何上代表同一个旋转，但欧氏数值上差了一倍模长。Pico头显的手部tracking在相邻帧偶尔会输出符号翻转的q（解算时挑了相反的半球），如果直接 `Δq = q_t - q_{t-1}`，正常情况下是接近0的小向量，符号翻转那帧就会突然变成一个 |Δq| ≈ 2的"伪大旋转"。训练数据里混了这种**完全虚假的大目标**，模型既学不到真规律，也压不住梯度。
+  - **四元数分量差不等于旋转增量**：直接相减无法保证合法旋转，也受符号翻转影响。几何增量可用旋转矩阵组合或四元数乘法表示，需要三维误差向量时再取log map。本项目选择absolute rotation-6D，简化目标和恢复过程。
+  - 附加问题：相比xyz这种本来就在欧氏空间的物理量，旋转delta对模型来说还要额外学一个非线性流形上的减法操作，难度更高。
 
-- 解决方案：把单手动作从 8D 改成 **10D = `xyz (3) + 6D rotation (6) + gripper (1)`**，双手合 20D，并调整 delta mask 为 `make_bool_mask(3, -7, 3, -7)`，即**只 xyz 做 delta，6D rot 和 gripper 全部 absolute**：
+- 解决方案：把单手动作从8D改成 **10D = `xyz (3) + 6D rotation (6) + gripper (1)`**，双手合20D，并调整delta mask为 `make_bool_mask(3, -7, 3, -7)`，即**只xyz做delta，6D rot和gripper全部absolute**：
 
-  - **旋转表示换成 6D rotation**（Zhou et al. 2019，旋转矩阵前两列展平）：连续可微、没有双覆盖、用 Gram-Schmidt 就能反解出合法的旋转矩阵，对回归非常友好。
-  - **旋转改成 absolute（不做 delta）**：直接预测下一时刻的目标旋转矩阵，彻底绕开 SO(3) 上 delta 怎么定义这个坑。代价是模型每帧都要从头预测姿态，但实测 6D 表示足够稳定，没有性能下降。
-  - **xyz 仍然 delta**：xyz 是平移量，本来就在欧氏空间，delta 物理上就是位移（≈ 速度 × dt），对模型最友好。
-  - **gripper 仍 absolute**：开/合是绝对状态，delta 没有物理意义。
+  - **旋转表示换成6D rotation**（Zhou et al. 2019，旋转矩阵前两列展平）：连续可微、没有双覆盖、用Gram-Schmidt就能反解出合法的旋转矩阵，对回归非常友好。
+  - **旋转改成absolute（不做delta）**：直接预测下一时刻的目标旋转矩阵，彻底绕开SO(3) 上delta怎么定义这个坑。代价是模型每帧都要从头预测姿态，但实测6D表示足够稳定，没有性能下降。
+  - **xyz仍然delta**：xyz是平移量，本来就在欧氏空间，delta物理上就是位移（≈ 速度 × dt），对模型最友好。
+  - **gripper仍absolute**：开/合是绝对状态，delta没有物理意义。
 
 - 教训：VLA/IL的旋转表示：
-  - 模型回归用的旋转表示永远用 **6D rotation** 或**直接 absolute 旋转矩阵 / 9D**，不用欧拉角（万向锁 + 不连续）、不用四元数（双覆盖）；
-  - 旋转**绝对不做欧氏空间的 delta**，要做就得在 SO(3) 上用 log map 做（项目里没必要这么复杂，直接 absolute 最稳）；
-  - delta vs absolute 是 **per-维度独立选择**的事——位移 delta、旋转 absolute、夹爪 absolute 是一套实测最稳的组合。
+  - 本项目使用 **6D rotation** 回归姿态；其他表示也可使用，但需处理欧拉角奇异性、四元数符号一致性或旋转矩阵约束；
+  - 需要旋转增量时，明确参考坐标系和组合顺序；不要把表示分量的直接相减当作几何旋转差；
+  - delta / absolute应按语义组选择，旋转组不能任意拆开；本项目采用位移delta、旋转absolute、夹爪absolute。
 
 ### 优化方向
 
-两条根据近期论文产生、可在 Pico ego + Kaiumi 双 policy 上落地的思路。
+两条根据近期论文产生、可在Pico ego + Kaiumi双policy上落地的思路。
 
 #### 1. 时间监督不平衡：让 ego 数据重监督关键帧
 
-- **问题**：当前 pico ego pipeline 把所有帧均匀送进 `pi05_pico` 训练。但 ego 视频大段是「悬停 / 接近 / 稳定搬运」等低信息帧，真正决定任务的「对齐 / 接触 / 抓取 / 释放」瞬间占比很小——等于把算力大头喂给了低价值帧。
+- **问题**：当前pico ego pipeline把所有帧均匀送进 `pi05_pico` 训练。但ego视频大段是「悬停 / 接近 / 稳定搬运」等低信息帧，真正决定任务的「对齐 / 接触 / 抓取 / 释放」瞬间占比很小——等于把算力大头喂给了低价值帧。
 
-- **参考论文**：FrameSkip（arXiv:2605.13757，2026）。dataloader 层用 AVI（动作变化）+ VAC（视觉-动作错位）+ TPI（任务进度先验）+ gripper 过渡 4 个轻量信号给每帧打分，按 retention ratio 剪枝；**不动模型架构、不动 loss、不动推理**。r=20% 时三 benchmark 平均 66.5% → 76.15%。
+- **参考论文**：FrameSkip（arXiv:2605.13757，2026）。dataloader层用AVI（动作变化）+ VAC（视觉-动作错位）+ TPI（任务进度先验）+ gripper过渡4个轻量信号给每帧打分，按retention ratio剪枝；**不动模型架构、不动loss、不动推理**。r=20% 时三benchmark平均66.5% → 76.15%。
 
 - **落地路径**：
-  - 在 pipeline Step 3（H5 → Parquet）后做一次离线打分，先只用最便宜的 AVI + gripper-aware（VAC 和 GMM-TPI 第一版可省），把分数写成 parquet 的 `importance` 列。
-  - 在 LeRobot dataloader 加一层 index remapping：按当前 retention ratio 用二分查找把请求 timestep 映射到最近的保留 timestep；openpi 训练侧（`pi05_pico` / `pi05_kaiumi`）一行不改。
-  - 配合现有 `quality: 0~5` 软分形成「trajectory 级 × frame 级」双层数据分配——`quality` 决定整条轨迹的采样权重，`importance` 决定轨迹内的帧采样。
+  - 在pipeline Step 3（H5 → Parquet）后做一次离线打分，先只用最便宜的AVI + gripper-aware（VAC和GMM-TPI第一版可省），把分数写成parquet的 `importance` 列。
+  - 在LeRobot dataloader加一层index remapping：按当前retention ratio用二分查找把请求timestep映射到最近的保留timestep；openpi训练侧（`pi05_pico` / `pi05_kaiumi`）一行不改。
+  - 配合现有 `quality: 0~5` 软分形成「trajectory级 × frame级」双层数据分配——`quality` 决定整条轨迹的采样权重，`importance` 决定轨迹内的帧采样。
 
 #### 2. 三阶段微调的先验丢失：用先验保留式适配替代 full fine-tune
 
-- **问题**：当前 `base ckpt → Pretrain(Ego) → Midtrain(UMI) → Posttrain(遥操)` 是串行 full fine-tune，每一阶段都会把上一阶段（含 π0.5 base）学到的广泛 motor / scene 先验**覆写成当前阶段的窄分布**。Posttrain 后 policy 在新光照 / 桌高 / 物体位置等 OOD 下鲁棒性不足，few-shot 真机数据时尤其明显。注意 KI（PI0.7）思路只冻 VLM，**action expert 的 motor prior 仍会被改写**，不能直接解决这个问题。
+- **问题**：当前 `base ckpt → Pretrain(Ego) → Midtrain(UMI) → Posttrain(遥操)` 是串行full fine-tune，每一阶段都会把上一阶段（含 π0.5 base）学到的广泛motor / scene先验**覆写成当前阶段的窄分布**。Posttrain后policy在新光照 / 桌高 / 物体位置等OOD下鲁棒性不足，few-shot真机数据时尤其明显。注意KI（PI0.7）思路只冻VLM，**action expert的motor prior仍会被改写**，不能直接解决这个问题。
 
-- **参考论文**：PriorVLA（arXiv:2605.10925，2026）。把预训练 VLA 看成两类只读先验源（VLM = scene prior，action expert = motor prior）。
-  - **Dual Action Experts**：预训练 AE 复制成 frozen Prior Expert + trainable Adaptation Expert，只有 AE 输出进 loss 和轨迹更新，PE 仅作为 motor 只读源。
-  - **Expert Queries**：Scene / Motor / Action 3 组可学习 token + attention mask，让 AE 单向读取两类先验（MQ 不许看 VLM prefix，避免被 scene 特征淹没）。
-  - 25% 可训参数全面赢过 full fine-tune；真机 few-shot OOD 10% → 32%（3.2×）。
+- **参考论文**：PriorVLA（arXiv:2605.10925，2026）。把预训练VLA看成两类只读先验源（VLM = scene prior，action expert = motor prior）。
+  - **Dual Action Experts**：预训练AE复制成frozen Prior Expert + trainable Adaptation Expert，只有AE输出进loss和轨迹更新，PE仅作为motor只读源。
+  - **Expert Queries**：Scene / Motor / Action 3组可学习token + attention mask，让AE单向读取两类先验（MQ不许看VLM prefix，避免被scene特征淹没）。
+  - 25% 可训参数全面赢过full fine-tune；真机few-shot OOD 10% → 32%（3.2×）。
 
 - **落地路径**：
-  - 优先在最敏感的 Posttrain(遥操) 阶段替换：冻住 Midtrain 出来的 AE 当 Prior Expert，复制一份作 Adaptation Expert 训练；VLM 同时冻。
-  - 3 组 Expert Queries 接入 openpi 双专家 attention mask（兼容现有 prefix/suffix mask 结构，新增 3 段可学习 token + 对应的单向 mask 即可）。
-  - 先在「Midtrain ckpt + 10–50 demo 遥操数据」的 few-shot 设定下对比 full fine-tune vs PriorVLA-style 适配的 OOD 成功率，作为最便宜的可行性验证。
-  - 推理多一次 PE forward 是已知成本，先用 chunked control 摊薄，后续再考虑 PE 蒸馏。
+  - 优先在最敏感的Posttrain(遥操) 阶段替换：冻住Midtrain出来的AE当Prior Expert，复制一份作Adaptation Expert训练；VLM同时冻。
+  - 3组Expert Queries接入openpi双专家attention mask（兼容现有prefix/suffix mask结构，新增3段可学习token + 对应的单向mask即可）。
+  - 先在「Midtrain ckpt + 10–50 demo遥操数据」的few-shot设定下对比full fine-tune vs PriorVLA-style适配的OOD成功率，作为最便宜的可行性验证。
+  - 推理多一次PE forward是已知成本，先用chunked control摊薄，后续再考虑PE蒸馏。
+
+<a id="project-magicatom"></a>
 
 ## 魔法原子工作总结-VLA算法工程师-magicvla预训练方向
 
 ### 项目总框架
 
+**版本范围：** 本节将 **32D base版本**与**后续34D训练版本**分别记录。第1节说明32D数据落盘契约，第2节说明原32D base；第3节介绍Dynamic/SGM，并单列34D配方。两版的动作索引、模型输入输出、mask和归一化统计各自配套，不相互替换。Dynamic/SGM是模型结构扩展，本身也支持32D，不能与34D画等号。
+
 ```text
 数据处理
-  ├─ Ego 数据
-  ├─ 混元开源 UMI 数据（当前主要负责）
+  ├─ EgoDex：virtual-hand EEF、坐标对齐与质量控制
+  ├─ Hy-UMI：相机参数估计与 ARX5 retarget
   ├─ 仿真数据
   └─ 真机数据
         ↓ 统一数据格式 / action 与 state 表示 / 质量控制
@@ -1202,35 +547,44 @@ MagicVLA-base pretrain
   └─ 多源数据路由与训练框架
         ↓ base checkpoint
 
-后训练：模型能力提升
+MagicVLA Dynamic / SGM
+  ├─ Action + 2D World + 3D World experts
+  ├─ DINOv3 / Track4World 冻结 teacher 监督
+  └─ 多分支 attention、梯度隔离与动作部署
+
+后训练：memory 能力探索
   ├─ memory 方向
   ├─ RoboMME 方法整理与接入
   ├─ DM05 方法整理与接入
   └─ 长时任务、遮挡、历史信息和 OOD 能力评估
 ```
 
-这三块的关系是：数据处理统一异构数据，base pretrain 学习通用 VLA 先验，后训练补强历史建模与复杂任务能力。
+数据处理统一异构输入，base学习动作先验；Dynamic加入视觉、几何和运动表征监督，memory利用历史观测缓解当前帧歧义。能力收益需分别通过实验验证。
+
+<a id="magic-data"></a>
 
 ### 1. 数据处理与预训练数据
 
-**一句话回答：** 我们把第一视角人手、Hy-UMI、真机和仿真数据统一为 LeRobot v2.1 的三相机、32D state/action、逐维 mask 契约；我主要负责 Hy-UMI 的 `cam_high` 无标定相机参数估计，以及将 UMI 双手 EEF 轨迹投影为 ARX5 双臂 joint 标签。
+框架与生产细节见[数据处理：魔法原子](Note_DataPipeline.md#data-magicatom)，两条pipeline的区别见[对比表](Note_DataPipeline.md#data-comparison)。
+
+**一句话回答：** 32D数据版本把第一视角人手、Hy-UMI、真机和仿真数据接入LeRobot v2.1、统一相机key和逐维mask契约；我主要负责Hy-UMI的 `cam_high` 无标定相机参数估计，以及将UMI双手EEF轨迹投影为ARX5双臂joint标签。
 
 #### 1.1 预训练数据构成
 
-当前 base 训练把 8 个机器人数据源按样本量混合为一个 robotics source，再以 robotics:EO VLM-SFT = 9:1 按 batch 交错。机器人数据使用行为克隆/flow matching，EO 提供视觉语言监督。
+本节对应的32D base配方把8个机器人数据源按样本量混合为一个robotics source，再以robotics:EO VLM-SFT = 9:1按batch交错。机器人数据使用行为克隆/flow matching，EO提供视觉语言监督。
 
 | 类别 | 数据源 | 机器人/相机特点 | 作用 |
 |---|---|---|---|
 | Ego | EgoDex | 人手第一视角，仅 `cam_high` | 学习第一视角操作和手部运动先验 |
-| UMI | Hy-Embodied UMI table_000/001 | 双手第一视角，`cam_high` + 双 wrist | 大规模人类示教，retarget 为 ARX5 |
+| UMI | Hy-Embodied UMI table_000/001 | 双手第一视角，`cam_high` + 双wrist | 大规模人类示教，retarget为ARX5 |
 | 真机 | RoboDojo real：ARX X5、PiPER、PiPER-X | 三相机、双臂 | 对齐真实机器人动力学和关节控制 |
 | 仿真 | RoboTwin2.0、RoboDojo sim | 三相机、跨机器人/任务 | 扩展任务、场景和轨迹覆盖 |
-| 真机 | Galaxea R1 Lite | head + 双 wrist，读取时映射为统一相机 key | 增加 embodiment 多样性 |
+| 真机 | Galaxea R1 Lite | head + 双wrist，读取时映射为统一相机key | 增加embodiment多样性 |
 | VLM | EO Robo2VLM SFT | 图文/视频问答 | 保留和增强视觉语言能力 |
 
-机器人数据在 source 内按物理样本量 `concat_shuffle`，不人为把小数据集重复到和大数据集一样多；每个 source 独立做 normalization，不能将人手、ARX5 和 PiPER 的统计量混用。
+机器人数据在source内按物理样本量 `concat_shuffle`，不人为把小数据集重复到和大数据集一样多；每个source独立做normalization，不能将人手、ARX5和PiPER的统计量混用。
 
-#### 1.2 统一 32D 数据契约
+#### 1.2 32D 版本的数据契约
 
 ```text
 state[t]：当前机器人状态
@@ -1239,32 +593,27 @@ dim_mask：该维度是否真实存在并参与输入/loss
 camera_valid：当前样本实际具备哪些相机
 ```
 
-
-
-
-
-
 | 索引 | 维度 | 语义 |
 |---|---:|---|
-| `0:6` | 6 | 左臂 joint |
-| `6` | 1 | 左 gripper |
-| `7:13` | 6 | 右臂 joint |
-| `13` | 1 | 右 gripper |
-| `14:17` | 3 | 左 EEF 在 `cam_high` 坐标系的 xyz |
-| `17:23` | 6 | 左 EEF rotation-6D |
-| `23:26` | 3 | 右 EEF 在 `cam_high` 坐标系的 xyz |
-| `26:32` | 6 | 右 EEF rotation-6D |
+| `0:6` | 6 | 左臂joint |
+| `6` | 1 | 左gripper |
+| `7:13` | 6 | 右臂joint |
+| `13` | 1 | 右gripper |
+| `14:17` | 3 | 左EEF在 `cam_high` 坐标系的xyz |
+| `17:23` | 6 | 左EEF rotation-6D |
+| `23:26` | 3 | 右EEF在 `cam_high` 坐标系的xyz |
+| `26:32` | 6 | 右EEF rotation-6D |
 
-设计为 32D 的原因：
+设计为32D的原因：
 
-- **统一模型接口**：不同机器人、joint 控制和 EEF 控制可共用同一个 action expert、checkpoint 和 action tokenizer。
-- **joint 与 EEF 互补**：前 14D 是可直接执行的双臂控制量；后 18D 把动作放到图像观察坐标系，提供更强的视觉几何对应。
-- **mask 而非假零值**：Hy-UMI 的兼容版本只有前 14D、部分源没有 EEF 或缺少 wrist 图像，均右侧补零并关闭相应 mask。mask 同时进入 state embedding 和 flow loss，避免把“未测量的 0”误当成“中位姿态/真实动作”。
-- **统一旋转语义**：EEF 使用连续 rotation-6D；训练中的 `chunk_delta` 对平移/joint 构造相对量，gripper 保持绝对状态，rotation group 用合法旋转组合处理，避免直接相减四元数。
+- **统一模型接口**：不同机器人、joint控制和EEF控制可共用同一个action expert、checkpoint和action tokenizer。
+- **joint与EEF互补**：前14D是可直接执行的双臂控制量；后18D把动作放到图像观察坐标系，提供更强的视觉几何对应。
+- **mask而非假零值**：Hy-UMI的兼容版本只有前14D、部分源没有EEF或缺少wrist图像，均右侧补零并关闭相应mask。mask同时进入state embedding和flow loss，避免把“未测量的0”误当成“中位姿态/真实动作”。
+- **统一旋转语义**：EEF使用连续rotation-6D；训练中的 `chunk_delta` 对平移/joint构造相对量，gripper保持绝对状态，rotation group用合法旋转组合处理，避免直接相减四元数。
 
 #### 1.3 总体 pipeline
 
-`/home/user/workspace/pretrain_data_pipeline` 是数据处理仓库。每种 source 只实现 reader，公共 transforms 负责质量检查、坐标处理、retarget 和写盘：
+`/pfs/user/pretrain_data_pipeline` 是数据处理仓库。每种source只实现reader，公共transforms负责质量检查、坐标处理、retarget和写盘：
 
 ```text
 Lance / HDF5 / 原始 LeRobot
@@ -1272,14 +621,48 @@ Lance / HDF5 / 原始 LeRobot
   → quality check / 异常修复
   → 坐标系变换、retarget、next-step action
   → 32D pack + state_mask/action_mask
-  → LeRobot v2.1：Parquet + 三路 MP4 + meta + norm statistics
+  → LeRobot v2.1：Parquet + 实际相机视频 + meta / quality / mask
+  → 按训练版本生成 normalization statistics
 ```
 
-训练 reader 再统一相机 key 为 `cam_high / cam_left_wrist / cam_right_wrist`；缺失相机使用 `camera_valid` 屏蔽，而不把零图像作为真实观测。
+训练reader再统一相机key为 `cam_high / cam_left_wrist / cam_right_wrist`；缺失相机使用 `camera_valid` 屏蔽，而不把零图像作为真实观测。
 
-#### 1.4 Hy-UMI 原始数据与清洗
+#### 1.4 EgoDex：人手轨迹到 virtual-hand EEF
 
-Hy-UMI 原始数据是 Lance-backed LeRobot v3，`table_000` 和 `table_001` 各约 1.16 万 episode、约 1,079 万帧，原始 30 FPS。每帧包含三路 `424x240` RGB、16D 双手跟踪状态和 2D gripper command：
+基础查阅：[坐标变换](Note_Basics.md#basic-transforms)、[旋转表示](Note_Basics.md#basic-rotation)。
+
+**目标：** 从单路头部视频、相机位姿/内参和人手关键点生成EEF state/action，接入32D数据契约。这里保留人手运动监督，不做机械臂IK；12个arm joint槽位补零且mask=0，开合量写入 `6/13`，双手EEF写入 `14:23/23:32`。
+
+**人手表示。** 当前生产分支使用 `virtual_hand`：以wrist与指根均值的中点作为palm原点，以palm指向中指尖构造approach轴，再用小指尖方向正交化构造其余轴。拇指与食指尖距离单独决定开合量：`clip((d-0.01)/(0.12-0.01), 0, 1)`，其中1表示张开。位姿轴和夹爪标量各有明确的几何来源。
+
+**坐标与动作生成顺序：**
+
+```text
+关键点 → virtual-hand pose + openness
+       → 质量检查与尖峰/不连续修复
+       → 世界坐标约定统一 + EEF 局部轴对齐
+       → action[t] = EEF[t+1]，同步移动 action 可见性标签
+       → state[t]、action[t] 均表达在当前相机 C_t 坐标系
+       → rotation-6D + 32D pack + state/action mask
+```
+
+世界系变换同时作用于手和相机；局部轴对齐采用右乘 `Rx(90°)`，只改变姿态。相机系目标为 `T_Ct_E(t+1) = inverse(T_W_C(t)) @ T_W_E(t+1)`，避免头部运动造成参考系混用。数据侧保存绝对next-step target，训练reader再构造chunk delta和归一化目标。
+
+**质量控制。** 检查图像可用性、EEF可见性、位置异常、速度/角速度突变、静止/冻结和场景运动。只对指定的尖峰与不连续轨迹修复，其余质量标签保留用于筛选和审计。两只手的EEF分别按可见性设置mask；action使用下一帧可见性。当前virtual-hand pack的两个开合量槽位没有绑定EEF可见性mask，不能概括为“整只手所有维度一起失效”。
+
+**生产版本。** 普通配置可裁剪首尾低信息段，保持内部轨迹连续；`120core` 配置使用deferred media，不裁剪帧区间，先写Parquet、元数据和媒体清单，再单独物化视频。断点恢复与媒体完整性共同保证图像和标签对齐。两版均只导出实际存在的 `cam_high`。
+
+**方案边界。** 仓库还保留 `egodex_hand_alignment` 等转换器，其原点和轴定义不同，不能复用virtual-hand的轴修正。后续34D配方通过reader映射此32D数据，并配置EgoDex动作2倍语义上采样；这不改变磁盘数据的32D定义。
+
+代码入口：
+
+- [人手 EEF 转换器](../pretrain_data_pipeline/src/pretrain_data_pipeline/data_io/eef_converter.py)：`compute_virtual_hand()`。
+- [普通生产配置](../pretrain_data_pipeline/configs/run/production/egodex_virtual_hand_quality_production.yaml) / [deferred-media 配置](../pretrain_data_pipeline/configs/run/production/egodex_virtual_hand_quality_production_120core.yaml)。
+- [ActionPostprocess](../pretrain_data_pipeline/src/pretrain_data_pipeline/transforms/action_postprocess/pipeline.py)：next-step、相机系、rotation-6D与pack。
+
+#### 1.5 Hy-UMI 原始数据与清洗
+
+Hy-UMI原始数据是Lance-backed LeRobot v3，`table_000` 和 `table_001` 各约1.16万episode、约1,079万帧，原始30 FPS。每帧包含三路 `424x240` RGB、16D双手跟踪状态和2D gripper command：
 
 ```text
 raw state = [L_xyz(3), L_quat_xyzw(4), L_gripper(1),
@@ -1287,25 +670,27 @@ raw state = [L_xyz(3), L_quat_xyzw(4), L_gripper(1),
 raw action = [L_gripper_command, R_gripper_command]
 ```
 
-处理时将四元数从 `xyzw` 统一为 `wxyz`；夹爪把原始 `0 mm=open, 90 mm=closed` 转为 `1=open, 0=closed`。测得 gripper state 与下一步 gripper command 分开保存，不能相互替代。
+处理时将四元数从 `xyzw` 统一为 `wxyz`；夹爪把原始 `0 mm=open, 90 mm=closed` 转为 `1=open, 0=closed`。测得gripper state与下一步gripper command分开保存，不能相互替代。
 
-质量控制先检查三路图像描述符、夹爪范围、EEF 可见性、位置异常、速度/角速度突变和静止段；只对异常 EEF 轨迹插值修复，再进入 IK。视频、EEF 与 action 共用同一帧索引，正式生产配置保持 30 FPS、原始 `424x240` 分辨率。
+质量控制先检查三路图像描述符、夹爪范围、EEF可见性、位置异常、速度/角速度突变和静止段；只对异常EEF轨迹插值修复，再进入IK。视频、EEF与action共用同一帧索引，正式生产配置保持30 FPS、原始 `424x240` 分辨率。
 
-#### 1.5 本人工作一：`cam_high` 无标定相机参数估计
+#### 1.6 本人工作一：`cam_high` 无标定相机参数估计
 
-Hy-UMI 没有官方 `cam_high` 内外参，且每帧可稳定利用的几何对应只有左右两个 UMI 设备。目标不是逐 episode 盲拟合，而是估计 table 级共享参数，并按 session/batch 做小范围 refinement。
+Hy-UMI没有官方 `cam_high` 内外参，且每帧可稳定利用的几何对应只有左右两个UMI设备。目标不是逐episode盲拟合，而是估计table级共享参数，并按session/batch做小范围refinement。
 
 1. 从多帧灰度图取时间中值作为背景；以亮桌面区域为搜索范围。
 2. 用 `max(|I-background|, background-I)` 同时保留运动和暗色证据，形态学去噪后取两个连通域；左右手尝试两种匹配，选总重投影误差更小的一种。
-3. 以针孔模型优化 15 个变量：相机旋转/平移 6D、共享焦距 1D、主点 2D、左右 device offset 各 3D。offset 解决 3D 跟踪原点和图像暗块质心并非同一点的问题。
-4. 优化目标是所有有效对应的 pixel residual 的最小 60% trimmed mean，降低遮挡、设备重叠和 blob 误检的影响；从经过验证的 seed 多次 Nelder-Mead 优化，而不是随机初始化。
-5. 标定输出 `T_W_C`（`cam_high -> UMI world`）和 K。训练 EEF 通过 `$T_C^E=(T_W^C)^{-1}T_W^E$` 转到相机系；**device offset 只用于标定，不写入 EEF 标签**。
+3. 以针孔模型优化15个变量：相机旋转/平移6D、共享焦距1D、主点2D、左右device offset各3D。offset解决3D跟踪原点和图像暗块质心并非同一点的问题。
+4. 优化目标是所有有效对应的pixel residual的最小60% trimmed mean，降低遮挡、设备重叠和blob误检的影响；从经过验证的seed多次Nelder-Mead优化，而不是随机初始化。
+5. 标定输出 `T_W_C`（`cam_high -> UMI world`）和K。训练EEF通过 `$T_C^E=(T_W^C)^{-1}T_W^E$` 转到相机系；**device offset只用于标定，不写入EEF标签**。
 
-table_000 的全局标定为 `fx=fy=235.7 px`，重投影中位误差约 41 px、held-out 约 37 px。由于 2D blob 是“手+设备”的质心而非动捕原点，存在约 15-20 px 的误差地板；验收以跨任务 overlay 为主，数值 residual 只作汇总。头戴相机跨 session 会变化，因此后续以 table 全局 K/offset 为先验，session 主要 refine rotation。
+table_000的全局标定为 `fx=fy=235.7 px`，重投影中位误差约41 px、held-out约37 px。由于2D blob是“手+设备”的质心而非动捕原点，存在约15-20 px的误差地板；验收以跨任务overlay为主，数值residual只作汇总。头戴相机跨session会变化，因此后续以table全局K/offset为先验，session主要refine rotation。
 
-#### 1.6 本人工作二：UMI EEF 到 ARX5 joint 投影
+#### 1.7 本人工作二：UMI EEF 到 ARX5 joint 投影
 
-目标是把人手 EEF 示教变成可由 ARX5 执行的 14D 双臂标签，而不是把人手坐标直接当成 robot joint。
+基础查阅：[IK 与阻尼伪逆](Note_Basics.md#basic-ik)。
+
+目标是把人手EEF示教变成可由ARX5执行的14D双臂标签，而不是把人手坐标直接当成robot joint。
 
 ```text
 UMI EEF pose
@@ -1316,29 +701,34 @@ UMI EEF pose
   → [L_joint1..6, L_gripper, R_joint1..6, R_gripper]
 ```
 
-- UMI world 和 ARX5 task frame 都采用 `+X forward, +Y left, +Z up`，所以 world 到 task 为 identity；但 UMI local hand axes 与 ARX5 TCP 不同，必须右乘固定 `hand_to_ee` 置换矩阵，否则姿态标签错误。
-- ARX5 base 不是相机外参。通过代表性 episode 搜索一套 `task_from_root`，以 IK 失败、碰撞、位置/姿态 residual 为主目标，并用双臂左右对称和朝向先验打破近似解；同一 session/batch 固定 base，避免跨 episode 的 joint 语义漂移。
-- 每臂使用 6-DoF URDF chain 的阻尼最小二乘 IK，限制单步 joint 变化 `0.12 rad`，并检查关节限位和双臂碰撞。table_000 小批量搜索得到 base 约为 `[0.107, 0, -0.704] m`、yaw 约 `-10 deg`；采样验证 128/128 IK 成功、0 碰撞。
-- joint state/action 使用 IK 得到的结果；相机系 EEF 标签保留 **送入 IK 的目标 EEF**，不再用 FK 回算覆盖，避免 URDF TCP 偏差和 IK residual 污染视觉几何监督。
+- UMI world和ARX5 task frame都采用 `+X forward, +Y left, +Z up`，所以world到task为identity；但UMI local hand axes与ARX5 TCP不同，必须右乘固定 `hand_to_ee` 置换矩阵，否则姿态标签错误。
+- ARX5 base不是相机外参。通过代表性episode搜索一套 `task_from_root`，以IK失败、碰撞、位置/姿态residual为主目标，并用双臂左右对称和朝向先验打破近似解；同一session/batch固定base，避免跨episode的joint语义漂移。
+- 每臂使用6-DoF URDF chain的阻尼最小二乘IK，限制单步joint变化 `0.12 rad`，并检查关节限位和双臂碰撞。table_000小批量搜索得到base约为 `[0.107, 0, -0.704] m`、yaw约 `-10 deg`；采样验证128/128 IK成功、0碰撞。
+- joint state/action使用IK得到的结果；相机系EEF标签保留 **送入IK的目标EEF**，不再用FK回算覆盖，避免URDF TCP偏差和IK residual污染视觉几何监督。
 
-#### 1.7 面试回答要点
+#### 1.8 面试回答要点
 
-- **你做了什么？** 负责 Hy-UMI 的无标定 `cam_high` 参数估计和 UMI EEF 到 ARX5 joint retarget，使人类第一视角示教可进入统一 32D 预训练。
-- **最大难点？** 两个 3D 点对应两个无标签图像 blob，焦距、位姿和设备偏置高度耦合；因此用跨 episode 共享参数、trimmed residual、显式左右匹配和 overlay 验收，而非逐帧/逐 episode 全参数拟合。
-- **为什么要 32D + mask？** 既保留 joint 的可执行性和 EEF 的视觉对齐，又让不同 embodiment 共用模型接口；mask 解决异构数据中“缺失维度”和“数值为零”不可区分的问题。
+- **EgoDex如何接入？** 从手部关键点构造virtual-hand EEF和开合量，生成当前相机系下的next-step target；无机器人joint的槽位关闭mask，再按训练版本完成映射和归一化。
+- **你做了什么？** 负责Hy-UMI的无标定 `cam_high` 参数估计和UMI EEF到ARX5 joint retarget，使人类第一视角示教可进入统一32D预训练。
+- **最大难点？** 两个3D点对应两个无标签图像blob，焦距、位姿和设备偏置高度耦合；因此用跨episode共享参数、trimmed residual、显式左右匹配和overlay验收，而非逐帧/逐episode全参数拟合。
+- **为什么要32D + mask？** 既保留joint的可执行性和EEF的视觉对齐，又让不同embodiment共用模型接口；mask解决异构数据中“缺失维度”和“数值为零”不可区分的问题。
 
-### 2. MagicVLA-base pretrain 模型架构
+<a id="magic-base"></a>
 
-**一句话回答：** MagicVLA-base 用 Qwen3.5-2B 承担视觉语言理解，用一个 460M 的连续 action expert 生成 32D、50-step 动作 chunk；两者只在 Qwen 的 full-attention 层进行单向 joint attention，因此既复用 VLM 先验，又避免把连续控制离散成语言 token。
+### 2. MagicVLA-base pretrain 模型架构（32D 版本）
+
+**一句话回答：** MagicVLA-base用Qwen3.5-2B承担视觉语言理解，用一个460M的连续action expert生成32D、50-step动作chunk；两者只在Qwen的full-attention层进行单向joint attention，因此既复用VLM先验，又避免把连续控制离散成语言token。
 
 #### 2.1 设计思路
 
-- **分工而非单塔硬做**：视觉、语言和任务理解已有强 Qwen 先验；动作是连续高频轨迹，直接预测 velocity 比量化为 token 更自然。于是 VLM 做条件前缀，action expert 做 flow matching。
-- **兼容 Qwen3.5 的混合骨干**：Qwen3.5 的 24 层按 `3 x Gated DeltaNet + 1 x full attention` 重复 6 次。线性注意力是递推结构，不能安全地把两种 token 直接拼接；所以仅在 6 个 full-attention 层融合，其余 18 层两支独立运行。
-- **异构 embodiment 可共训**：数据层统一为 32D，但不是强行假装每个机器人都有全部维度。state/action mask、相机有效位和 source-specific normalization 同时进入模型和 loss。
-- **保留通用视觉语言能力**：机器人 flow loss 不直接冲击 VLM；通过 knowledge insulation 隔离梯度，VLM 主要由 FAST action CE 和 EO VLM-SFT 的 next-token CE 更新。
+- **分工而非单塔硬做**：视觉、语言和任务理解已有强Qwen先验；动作是连续高频轨迹，直接预测velocity比量化为token更自然。于是VLM做条件前缀，action expert做flow matching。
+- **兼容Qwen3.5的混合骨干**：Qwen3.5的24层按 `3 x Gated DeltaNet + 1 x full attention` 重复6次。线性注意力是递推结构，不能安全地把两种token直接拼接；所以仅在6个full-attention层融合，其余18层两支独立运行。
+- **异构embodiment可共训**：数据层统一为32D，但不是强行假装每个机器人都有全部维度。state/action mask、相机有效位和source-specific normalization同时进入模型和loss。
+- **保留通用视觉语言能力**：机器人flow loss不直接冲击VLM；通过knowledge insulation隔离梯度，VLM主要由FAST action CE和EO VLM-SFT的next-token CE更新。
 
 #### 2.2 模型结构与信息流
+
+基础查阅：[RMSNorm](Note_Basics.md#basic-rmsnorm)、[SwiGLU](Note_Basics.md#basic-swiglu)、[RoPE](Note_Basics.md#basic-rope)。
 
 ```text
 cam_high + left/right wrist + task text + 32D state/mask
@@ -1354,64 +744,64 @@ velocity[50, 32]  -- reverse flow --> future action chunk
 
 | 模块 | 实现细节 | 作用 |
 |---|---|---|
-| 多模态 prefix | Qwen 原生图像编码；三相机 letterbox 到 `256x256`；文本为 task/embodiment 条件 | 形成场景与任务语义 |
-| state 条件 | `state(32) + state_dim_mask(32)` 经 MLP 投成 1 个连续 prefix token；同时以 additive condition 加到每个 action token | 避免把 32 个数字展开为约 294 个文本 token；显式区分缺失维度与归一化后的零值 |
-| action expert | 输入 `noisy_action[50,32]`，加 action position、flow-time embedding 和 state condition；24 层、width `1024`、SwiGLU `3072` | 直接建模连续 chunk，不依赖动作词表 |
-| Hybrid schedule | 18 个 Gated DeltaNet 层分别更新 VLM/action；6 个 full-attention 层共享 attention 计算 | 以较低成本让动作读取视觉语言上下文，并保持与 Qwen 预训练层型一致 |
-| output head | RMSNorm + linear，输出每个动作位置的 32D velocity | 供 flow matching 训练和 Euler 反演 |
+| 多模态prefix | Qwen原生图像编码；三相机letterbox到 `256x256`；文本为task/embodiment条件 | 形成场景与任务语义 |
+| state条件 | `state(32) + state_dim_mask(32)` 经MLP投成1个连续prefix token；同时以additive condition加到每个action token | 避免把32个数字展开为约294个文本token；显式区分缺失维度与归一化后的零值 |
+| action expert | 输入 `noisy_action[50,32]`，加action position、flow-time embedding和state condition；24层、width `1024`、SwiGLU `3072` | 直接建模连续chunk，不依赖动作词表 |
+| Hybrid schedule | 18个Gated DeltaNet层分别更新VLM/action；6个full-attention层共享attention计算 | 以较低成本让动作读取视觉语言上下文，并保持与Qwen预训练层型一致 |
+| output head | RMSNorm + linear，输出每个动作位置的32D velocity | 供flow matching训练和Euler反演 |
 
-full-attention 中序列固定为 `[VLM prefix, action suffix]`，mask 是非对称的：
+full-attention中序列固定为 `[VLM prefix, action suffix]`，mask是非对称的：
 
 | query \ key | VLM prefix | action suffix |
 |---|---|---|
 | VLM prefix | causal + valid | 禁止 |
-| action suffix | 全部有效 prefix | chunk 内双向 |
+| action suffix | 全部有效prefix | chunk内双向 |
 
-因此 action 可以使用视觉语言条件和整个未来 chunk 的协同信息；VLM 永远看不到动作 target，不产生动作信息泄漏。两支 hidden size 虽为 `2048/1024`，但 full-attention 的 head 规格兼容，attention 后再分别走各自的 output projection。
+因此action可以使用视觉语言条件和整个未来chunk的协同信息；VLM不读取连续action suffix；训练时追加的FAST动作token用于CE，必须从AE可读取的prefix中排除，避免目标泄漏。两支hidden size虽为 `2048/1024`，但full-attention的head规格兼容，attention后再分别走各自的output projection。
 
 ##### 2.2.1 Qwen 与 Action Expert 关键参数对照
 
-以下按 `magicvla/configs/train/magicvla_base_pretrain_robot_group_8data_eo_wandb_200k.yaml` 汇总。**Qwen 指 VLM 的语言骨干，不包括视觉塔。** 本次环境未找到配置指定的 Qwen checkpoint；Qwen hidden size 依据仓库文档，层型与注意力规格依据 `MagicVLABasePolicy._validate_hybrid_layout()` 的强制匹配检查，未直接读取 checkpoint 核验。
+以下按 `magicvla/configs/train/magicvla_base_pretrain_robot_group_8data_eo_wandb_200k.yaml` 汇总。**Qwen指VLM的语言骨干，不包括视觉塔。** 本次环境未找到配置指定的Qwen checkpoint；Qwen hidden size依据仓库文档，层型与注意力规格依据 `MagicVLABasePolicy._validate_hybrid_layout()` 的强制匹配检查，未直接读取checkpoint核验。
 
-| 整体参数 | Qwen 语言骨干 | Action Expert |
+| 整体参数 | Qwen语言骨干 | Action Expert |
 |---|---|---|
-| hidden size：每个 token 的主干宽度 | 2048 | 1024 |
+| hidden size：每个token的主干宽度 | 2048 | 1024 |
 | 层数 | 24 | 24 |
 | 层型排列 | `[DeltaNet × 3 → Full Attention] × 6` | 相同 |
-| DeltaNet / Full Attention 层数 | 18 / 6 | 18 / 6 |
-| SwiGLU 中间维度 | 本次未核实 | 3072 |
-| token 数量 | 图像、文本和状态构成的 prefix 长度 L | 50 个动作时刻 |
+| DeltaNet / Full Attention层数 | 18 / 6 | 18 / 6 |
+| SwiGLU中间维度 | 本次未核实 | 3072 |
+| token数量 | 图像、文本和状态构成的prefix长度L | 50个动作时刻 |
 | 主干特征形状 | `[B, L, 2048]` | `[B, 50, 1024]` |
 
-**Full Attention 规格：主干宽度不同，但投影后的头规格一致。**
+**Full Attention规格：主干宽度不同，但投影后的头规格一致。**
 
 | 参数 | Qwen | Action Expert |
 |---|---|---|
-| Q 头数 | 8 | 8 |
-| K/V 头数 | 2 | 2 |
+| Q头数 | 8 | 8 |
+| K/V头数 | 2 | 2 |
 | 每头维度 | 256 | 256 |
-| Q 总宽度 | 2048 | 2048 |
-| K、V 各自总宽度 | 512 | 512 |
+| Q总宽度 | 2048 | 2048 |
+| K、V各自总宽度 | 512 | 512 |
 | 注意力输出投影 | `2048 → 2048` | `2048 → 1024` |
 
-8 个 Q 头共享 2 组 K/V，即每 4 个 Q 头共享一组 K/V（GQA）。AE 的 `q_proj` 同时生成 Q 和 gate，因此实际线性层输出为 `4096 = 2048 Q + 2048 gate`。
+8个Q头共享2组K/V，即每4个Q头共享一组K/V（GQA）。AE的 `q_proj` 同时生成Q和gate，因此实际线性层输出为 `4096 = 2048 Q + 2048 gate`。
 
-在第 4、8、12、16、20、24 层，Qwen 当前层输入经归一化及其自身 K/V 投影生成条件；AE 用自己的投影生成 Q/K/V。两支 K/V 分别为 `[B, 2, L, 256]` 和 `[B, 2, 50, 256]`，沿序列维拼为 `[B, 2, L+50, 256]`，供 AE 的 Q 读取。AE 在一次注意力计算中同时读取 VLM 条件与动作 chunk；Qwen 仍单独运行原生层，不读取动作 suffix。
+在第4、8、12、16、20、24层，Qwen当前层输入经归一化及其自身K/V投影生成条件；AE用自己的投影生成Q/K/V。两支K/V分别为 `[B, 2, L, 256]` 和 `[B, 2, 50, 256]`，沿序列维拼为 `[B, 2, L+50, 256]`，供AE的Q读取。AE在一次注意力计算中同时读取VLM条件与动作chunk；Qwen仍单独运行原生层，不读取动作suffix。
 
-**DeltaNet 规格：两支分别运行，不交换 K/V。**
+**DeltaNet规格：两支分别运行，不交换K/V。**
 
 | 参数 | Qwen | Action Expert |
 |---|---|---|
-| Q/K 头数 | 16 | 16 |
-| V 头数 | 16 | 16 |
-| Q/K 每头维度 | 128 | 128 |
-| V 每头维度 | 128 | 128 |
-| Q、K、V 各自总宽度 | 2048 | 2048 |
+| Q/K头数 | 16 | 16 |
+| V头数 | 16 | 16 |
+| Q/K每头维度 | 128 | 128 |
+| V每头维度 | 128 | 128 |
+| Q、K、V各自总宽度 | 2048 | 2048 |
 | 因果卷积核大小 | 4 | 4 |
 
-DeltaNet 的 16 头与 Full Attention 的 8 个 Q 头属于不同模块。层型和头规格对齐是当前实现的设计选择，不意味着两支共享全部参数，也不是所有 VLA 都必须如此设计。
+DeltaNet的16头与Full Attention的8个Q头属于不同模块。层型和头规格对齐是当前实现的设计选择，不意味着两支共享全部参数，也不是所有VLA都必须如此设计。
 
-**AE 输入与输出：**
+**AE输入与输出：**
 
 ```text
 带噪动作 [B, 50, 32] → Linear(32, 1024) → [B, 50, 1024]
@@ -1426,68 +816,70 @@ DeltaNet 的 16 头与 Full Attention 的 8 个 Q 头属于不同模块。层型
                   velocity [B, 50, 32]
 ```
 
-AE 的 state MLP 为 `32 → 1024 → 1024`；VLM prefix 的状态投影是另一套 MLP，输入包含 state 与 mask。**32 是动作空间维度，1024 是 AE 主干宽度，256 是 Full Attention 每头维度。** flow time 表示噪声阶段，与 chunk 内的动作位置不同；输出 velocity 是 flow 空间变化率，不等同于关节物理速度。
+AE的state MLP为 `32 → 1024 → 1024`；VLM prefix的状态投影是另一套MLP，输入包含state与mask。**32是动作空间维度，1024是AE主干宽度，256是Full Attention每头维度。** flow time表示噪声阶段，与chunk内的动作位置不同；输出velocity是flow空间变化率，不等同于关节物理速度。
 
-代码入口（均位于 `magicvla/src/models/magicvla_base/modeling_magicvla_base.py`）：`QwenHybridActionExpert` 组装专家，`embed_inputs()` 注入输入条件，`QwenJointFullAttention` 处理 K/V 交互，`_run_joint_trunks()` 按层调度两支，`_validate_hybrid_layout()` 校验规格兼容性。
+代码入口（均位于 `magicvla/src/models/magicvla_base/modeling_magicvla_base.py`）：`QwenHybridActionExpert` 组装专家，`embed_inputs()` 注入输入条件，`QwenJointFullAttention` 处理K/V交互，`_run_joint_trunks()` 按层调度两支，`_validate_hybrid_layout()` 校验规格兼容性。
 
 #### 2.3 32D 训练与推理契约
 
-训练机器人 batch 的目标是归一化后的 `action[50,32]`。采样 `$t\sim Beta(1.5,1.0)$` 并截断到 `[0.001,0.999]`，构造 `$x_t=(1-t)a+t\epsilon$`，模型预测 velocity `$\epsilon-a$`。loss 只在 `~action_is_pad & action_dim_mask` 的元素上计算，可选提高前几个可执行 horizon 的权重。
+基础查阅：[Flow Matching](Note_Basics.md#basic-flow)、[Masked MSE](Note_Basics.md#basic-masked-mse)、[归一化](Note_Basics.md#basic-normalization)。
 
-- **chunk delta**：joint/平移使用相对当前 state 的 delta；gripper 保持绝对命令；两组 EEF rotation-6D 用 `$R_{target}R_{state}^{T}$` 组合，而非逐元素相减。
-- **共同训练**：8 个机器人 source 用 flow matching，EO VLM-SFT 用 Qwen CE；当前主配方为 robotics:EO=`9:1`。FAST 是辅助的动作 token CE，不参与部署时的动作生成。
-- **Knowledge insulation**：action expert 读取 detached VLM prefix，flow gradient 不更新 VLM；关闭 KI 时可做完全端到端共同优化。当前 8-source 配方开启 KI，VLM 通过 FAST/EO loss 更新。
-- **推理**：从 masked Gaussian noise 开始，默认 10 次 Euler reverse-flow。VLM prefix 与每个 full-attention 层的 K/V 对噪声步骤无关，先计算一次并缓存；每一步都重新施加 action mask，保证训练与推理都不会在不存在的 embodiment 维度上产生噪声或速度。
-- **部署闭环**：按 source 的 quantile stats 反归一化，再按 delta/rotation 规则还原到 action target。故 checkpoint 必须携带 normalization metadata，只有权重不能正确执行动作。
+训练机器人batch的目标是归一化后的 `action[50,32]`。采样 `$t\sim Beta(1.5,1.0)$` 并截断到 `[0.001,0.999]`，构造 `$x_t=(1-t)a+t\epsilon$`，模型预测velocity `$\epsilon-a$`。loss只在 `~action_is_pad & action_dim_mask` 的元素上计算，可选提高前几个可执行horizon的权重。
+
+- **chunk delta**：joint/平移使用相对当前state的delta；gripper保持绝对命令；两组EEF rotation-6D用 `$R_{target}R_{state}^{T}$` 组合，而非逐元素相减。
+- **共同训练**：8个机器人source用flow matching，EO VLM-SFT用Qwen CE；当前主配方为robotics:EO=`9:1`。FAST是辅助的动作token CE，不参与部署时的动作生成。
+- **Knowledge insulation**：action expert读取detached VLM prefix，flow gradient不更新VLM；关闭KI时可做完全端到端共同优化。当前8-source配方开启KI，VLM通过FAST/EO loss更新。
+- **推理**：从masked Gaussian noise开始，默认10次Euler reverse-flow。VLM prefix与每个full-attention层的K/V对噪声步骤无关，先计算一次并缓存；每一步都重新施加action mask，保证训练与推理都不会在不存在的embodiment维度上产生噪声或速度。
+- **部署闭环**：按source的quantile stats反归一化，再按delta/rotation规则还原到action target。故checkpoint必须携带normalization metadata，只有权重不能正确执行动作。
 
 #### 2.4 实际排障记录
 
 | 问题 | 根因 | 修复与防回归 |
 |---|---|---|
-| full fine-tune 第一次真实 forward 直接报 `AttributeError` | joint trunk 从 decoder layer 读取 `block_type`；Transformers 5.5.4 改名为 `layer_type`，而旧 fake test 恰好复制了错误假设 | 改从 checkpoint 的 `text_config.layer_types` 读取层调度，并在初始化校验 action expert 与 VLM 的 24 层 schedule 一致；测试模拟真实 layer 缺少该属性 |
-| 缺失维度被当作“中位姿态” | quantile normalization 后 `0` 是范围中点。旧逻辑把 masked state 清零后丢弃 mask，RoboTwin2 右 EEF 仅约 41.3% 帧有效 | 将 32D state mask 与 state 一起输入 MLP；action mask 同时控制 noise、flow loss 和每一轮推理更新 |
-| EEF rotation 的 delta 语义错误但 loss 不报错 | 旧实现直接相减 rotation-6D，结果不在 SO(3)，且同一手腕运动会随参考坐标变化 | 改为 `$R_{rel}=R_{target}R_{state}^{T}$` 后再转 rotation-6D；把 rotation 规则写入 norm-stats signature，拒绝复用旧统计量 |
-| 多卡训练有效随机性不足，resume 后更新几乎停滞 | 所有 rank 用同一全局 RNG，flow time/noise 完全相同；同时 optimizer load 把 bf16 参数对应的 fp32 master/moments 强转回 bf16 | rank-aware seed 保留数据 source 同步而区分模型随机数；resume 后显式恢复 fp32 optimizer state，并在关闭 autocast 的 fp32 delta-rule 路径测试 |
-| FAST 辅助目标和部署动作不一致 | episode 尾部 padding 被置零后仍送入 FAST tokenizer；归一化零值并非“静止”，生成了伪造的回中位动作 token | tokenizer 按 sample 截断/前向填充 invalid tail；flow 与 FAST 共享 pad 语义。checkpoint 保存并强制校验 per-source normalization/delta metadata |
+| full fine-tune第一次真实forward直接报 `AttributeError` | joint trunk从decoder layer读取 `block_type`；Transformers 5.5.4改名为 `layer_type`，而旧fake test恰好复制了错误假设 | 改从checkpoint的 `text_config.layer_types` 读取层调度，并在初始化校验action expert与VLM的24层schedule一致；测试模拟真实layer缺少该属性 |
+| 缺失维度被当作“中位姿态” | quantile normalization后 `0` 是范围中点。旧逻辑把masked state清零后丢弃mask，RoboTwin2右EEF仅约41.3% 帧有效 | 将32D state mask与state一起输入MLP；action mask同时控制noise、flow loss和每一轮推理更新 |
+| EEF rotation的delta语义错误但loss不报错 | 旧实现直接相减rotation-6D，结果不在SO(3)，且同一手腕运动会随参考坐标变化 | 改为 `$R_{rel}=R_{target}R_{state}^{T}$` 后再转rotation-6D；把rotation规则写入norm-stats signature，拒绝复用旧统计量 |
+| 多卡训练有效随机性不足，resume后更新几乎停滞 | 所有rank用同一全局RNG，flow time/noise完全相同；同时optimizer load把bf16参数对应的fp32 master/moments强转回bf16 | rank-aware seed保留数据source同步而区分模型随机数；resume后显式恢复fp32 optimizer state，并在关闭autocast的fp32 delta-rule路径测试 |
+| FAST辅助目标和部署动作不一致 | episode尾部padding被置零后仍送入FAST tokenizer；归一化零值并非“静止”，生成了伪造的回中位动作token | tokenizer按sample截断/前向填充invalid tail；flow与FAST共享pad语义。checkpoint保存并强制校验per-source normalization/delta metadata |
 
 #### 2.5 面试回答要点
 
-以下按当前 32D、50-step MagicVLA-base 配置回答；`B` 为 batch size，`L` 为多模态条件 prefix 长度。
+以下按当前32D、50-step MagicVLA-base配置回答；`B` 为batch size，`L` 为多模态条件prefix长度。
 
-**1. VLA 的视觉编码部分怎么做？**
+**1. VLA的视觉编码部分怎么做？**
 
-三路相机图像先等比例缩放并补边到 `256×256`，再由 Qwen 原生 processor 和视觉编码器处理：切成 patch，经过视觉骨干提取特征，再通过合并、投影形成宽度为 `2048` 的视觉 token，插入语言序列的图像占位位置。切 patch 只是第一步，视觉 token 数要以 processor 产生的图像网格为准。
+三路相机图像先等比例缩放并补边到 `256×256`，再由Qwen原生processor和视觉编码器处理：切成patch，经过视觉骨干提取特征，再通过合并、投影形成宽度为 `2048` 的视觉token，插入语言序列的图像占位位置。切patch只是第一步，视觉token数要以processor产生的图像网格为准。
 
-**2. 视觉 token 的位置信息怎么嵌入？**
+**2. 视觉token的位置信息怎么嵌入？**
 
-视觉编码器内部处理 patch 的空间位置；进入语言骨干后，`compute_3d_position_ids()` 根据图像网格等信息生成时间、高度、宽度位置 ID，再通过 Qwen 的多模态旋转位置编码作用于注意力 Q/K。**RoPE 虽使用正弦、余弦，但它旋转的是 Q/K，不是简单把正余弦向量加到 token embedding 上。**
+视觉编码器内部处理patch的空间位置；进入语言骨干后，`compute_3d_position_ids()` 根据图像网格等信息生成时间、高度、宽度位置ID，再通过Qwen的多模态旋转位置编码作用于注意力Q/K。**RoPE虽使用正弦、余弦，但它旋转的是Q/K，不是简单把正余弦向量加到token embedding上。**
 
 **3. 自注意力本身不编码位置，动作序列怎么处理？**
 
-AE 为 50 个动作位置设置可学习的 embedding，形状为 `[1,50,1024]`，加入动作特征；full-attention 中还对动作 Q/K 使用 RoPE。不同动作位置的 embedding 不同，同一组位置 embedding 在 batch 间共享。动作位置表示未来第几步，flow-time embedding 表示当前噪声阶段，两者不能混淆。各位置共享网络参数和当前样本的 state/time 条件，不是共享动作值。
+AE为50个动作位置设置可学习的embedding，形状为 `[1,50,1024]`，加入动作特征；full-attention中还对动作Q/K使用RoPE。不同动作位置的embedding不同，同一组位置embedding在batch间共享。动作位置表示未来第几步，flow-time embedding表示当前噪声阶段，两者不能混淆。各位置共享网络参数和当前样本的state/time条件，不是共享动作值。
 
-**4. Flow matching 做动作生成，输入来自哪里？**
+**4. Flow matching做动作生成，输入来自哪里？**
 
-AE 的直接输入为带噪动作 `x_t [B,50,32]`、flow time `t [B]` 和当前 state `[B,32]`；图像、文本和状态形成的 VLM prefix 提供条件。训练时构造 `x_t=(1-t)a+tε`，目标 velocity 为 `ε-a`；推理时从高斯噪声开始迭代更新。两支逐层运行，在 6 个 full-attention 层拼接 K/V，最终预测 `[B,50,32]` 的 velocity。**不是两支完整跑完后再拼特征；flow matching 是训练和生成方法，不是 backbone 后额外的模块。**
+AE的直接输入为带噪动作 `x_t [B,50,32]`、flow time `t [B]` 和当前state `[B,32]`；图像、文本和状态形成的VLM prefix提供条件。训练时构造 `x_t=(1-t)a+tε`，目标velocity为 `ε-a`；推理时从高斯噪声开始迭代更新。两支逐层运行，在6个full-attention层拼接K/V，最终预测 `[B,50,32]` 的velocity。**不是两支完整跑完后再拼特征；flow matching是训练和生成方法，不是backbone后额外的模块。**
 
-**5. Flow matching 使用的 VLM 向量怎么理解？**
+**5. Flow matching使用的VLM向量怎么理解？**
 
-它是一串经过上下文融合的条件特征 `[B,L,2048]`，表达图像、任务文本与当前状态；AE 读取对应 full-attention 层的中间特征生成的 K/V，而非只读取最终一个向量。`state(32)` 与 `mask(32)` 拼成 64 维后，经 MLP 形成 1 个状态 token。真实 action chunk 不属于 AE 可读取的 prefix；训练追加的 FAST 动作 token 仅用于语言 CE，AE 不能读取，避免答案泄漏。
+它是一串经过上下文融合的条件特征 `[B,L,2048]`，表达图像、任务文本与当前状态；AE读取对应full-attention层的中间特征生成的K/V，而非只读取最终一个向量。`state(32)` 与 `mask(32)` 拼成64维后，经MLP形成1个状态token。真实action chunk不属于AE可读取的prefix；训练追加的FAST动作token仅用于语言CE，AE不能读取，避免答案泄漏。
 
-**6. 交互注意力的 Q、K、V 来自哪里？**
+**6. 交互注意力的Q、K、V来自哪里？**
 
-Q 来自 AE；K/V 来自 VLM prefix 和 AE 两部分，使用各自的投影后沿 token 维拼接：`Q=Q_action`，`K=[K_vlm;K_action]`，`V=[V_vlm;V_action]`。因此是非对称 joint attention：一次注意力同时读取外部条件和动作 chunk，VLM 自身不读取动作 suffix。
+Q来自AE；K/V来自VLM prefix和AE两部分，使用各自的投影后沿token维拼接：`Q=Q_action`，`K=[K_vlm;K_action]`，`V=[V_vlm;V_action]`。因此是非对称joint attention：一次注意力同时读取外部条件和动作chunk，VLM自身不读取动作suffix。
 
 | 张量 | 形状 |
 |---|---|
 | AE Q | `[B,8,50,256]` |
 | VLM K、V | 各为 `[B,2,L,256]` |
 | AE K、V | 各为 `[B,2,50,256]` |
-| 拼接 K、V | 各为 `[B,2,L+50,256]` |
+| 拼接K、V | 各为 `[B,2,L+50,256]` |
 
-**7. 推理为什么比较快？K/V cache 起什么作用？**
+**7. 推理为什么比较快？K/V cache起什么作用？**
 
-当前默认用 10 次 Euler 更新，每轮同时预测整段 50 步动作的 velocity，无需将动作离散后逐 token 自回归生成。固定观测下，VLM 不读取带噪动作，因此其条件不随 `x_t` 和 `t` 变化；视觉编码与 VLM prefix 只需计算一次，缓存 6 个交互层的 K/V，后续只运行较小的 AE。AE 自身 Q/K/V 随迭代变化，仍需每轮重算；观测、任务或状态变化后需重建 VLM cache。10 步是当前配置，实际延迟还取决于硬件、prefix 长度和执行后端。
+当前默认用10次Euler更新，每轮同时预测整段50步动作的velocity，无需将动作离散后逐token自回归生成。固定观测下，VLM不读取带噪动作，因此其条件不随 `x_t` 和 `t` 变化；视觉编码与VLM prefix只需计算一次，缓存6个交互层的K/V，后续只运行较小的AE。AE自身Q/K/V随迭代变化，仍需每轮重算；观测、任务或状态变化后需重建VLM cache。10步是当前配置，实际延迟还取决于硬件、prefix长度和执行后端。
 
 ```text
 视觉编码 + VLM 前向一次 → 缓存 6 层 prefix K/V
@@ -1497,362 +889,234 @@ Q 来自 AE；K/V 来自 VLM prefix 和 AE 两部分，使用各自的投影后�
 
 **其他设计与工程追问：**
 
-- **为什么不直接让 VLM 输出动作 token？** 50 步 32D 轨迹是连续、强时序相关的控制量。flow expert 在连续空间生成更合适，FAST 只作为保护 VLM 表征的辅助监督。
-- **为什么只在部分层 joint attention？** Qwen 的 DeltaNet 是递推线性注意力，强行拼接会破坏其状态语义；full-attention 层支持标准 Q/K/V 融合，6 次交互已能把条件传给 action branch。
-- **最重要的工程原则？** 32D 不只是 padding shape；mask、归一化、delta 规则、checkpoint metadata 和推理反归一化必须是一套契约。否则训练 loss 正常，部署动作仍可能是错误的。
+- **为什么不直接让VLM输出动作token？** 50步32D轨迹是连续、强时序相关的控制量。flow expert在连续空间生成更合适，FAST只作为保护VLM表征的辅助监督。
+- **为什么只在部分层joint attention？** Qwen的DeltaNet是递推线性注意力，强行拼接会破坏其状态语义；full-attention层支持标准Q/K/V融合，6次交互已能把条件传给action branch。
+- **最重要的工程原则？** 32D不只是padding shape；mask、归一化、delta规则、checkpoint metadata和推理反归一化必须是一套契约。否则训练loss正常，部署动作仍可能是错误的。
 
-#### 手撕伪代码
-1. Scaled Dot-Product Attention
-```python
-def attention(q,k,v,mask=none):
-    # q: [B,H,Lq,d]
-    # k: [B,H,Lk,d]
-    # v: [B,H,Lk,d]
-    
-    d=q.shape(-1)
+### 3. MagicVLA Dynamic / SGM
 
-    score=q@k.transpose(-2,-1)
-    score=score/sqrt(d)
+本节用于项目复述；完整的信息流、训练与推理说明见 [Dynamic / SGM 原理](MagicAtom/04_Dynamic模型/01_MagicVLA_Dynamic_SGM.md)。
 
-    if mask is not None:
-        score=score+mask
+**一句话回答：** 在base的动作专家旁增加2D、3D world experts，用冻结teacher提供视觉、几何和运动latent监督，并在full-attention层与动作分支交互。目标是增强动作条件表征；闭环收益需单独验证。
 
-    #这个 Query 把 100% 的注意力分配给这些 Key
-    weight=softmax(score,dim=-1)
-    out=weight@v
-    return out
+#### 3.1 模型结构与监督
+
+```text
+当前图像 + 文本 + state/mask → Qwen VLM prefix
+                                  ↓ 各 full-attention 层提供 K/V
+                     2D World ↔ 3D World ↔ Action
+                         ↓          ↓          ↓
+                    视觉 latent  几何/运动 latent  action velocity
 ```
 
-### 3. 后训练：memory 方向
+箭头表示可配置的信息通路，实际可见关系由配置决定。各专家在DeltaNet层分别运行，在full-attention层读取允许的K/V；VLM自身保持原生causal attention，不读取专家token。
 
-这一阶段的目标不是重新预训练 VLA，而是以 RoboDojo 轨迹为数据，对已有 base policy 做后训练 / SFT，让模型在动作预测时利用当前帧以前的视觉信息。实验中既有 Pi0.5，也有 MagicVLA / Hy-VLA 类基座的尝试；下文的脚本和源码路径以当前能核对到的 Pi0.5、Hy-VLA 实现为准。动作 chunk、动作空间和 flow-matching 监督原则上保持不变，主要比较的是“历史信息放在哪里、怎样压缩、怎样注入动作专家”。
+| 分支 | 输入/预测 | 训练监督 |
+|---|---|---|
+| Action | 带噪action chunk、state、flow time → velocity | Flow Matching |
+| 2D World | 可学习视觉queries → patch latent | 冻结DINOv3编码未来图像 |
+| 3D World | 可学习queries → geometry / motion latent | 冻结Track4World处理当前—未来帧对 |
+| VLM | 图像、任务与状态条件 | 配置启用的FAST CE / VLM-SFT CE |
+
+这里预测的是特征表示，并非直接生成未来RGB视频。未来帧进入teacher监督路径；部署仅提供当前观测。future offset可按各source的action chunk时间跨度推导：50个动作点在2倍上采样源上对应25个源帧，不能统一解释成50帧视频。
+
+#### 3.2 信息可见性与梯度路径
+
+基础查阅：[Masked Attention](Note_Basics.md#basic-masked-attention)。
+
+默认的专家可见关系如下；每一行都可由 `joint_attention_visibility` 配置：
+
+| Query \ K/V | VLM prefix | 2D World | 3D World | Action |
+|---|---|---|---|---|
+| VLM | causal | 不可见 | 不可见 | 不可见 |
+| 2D World | 可见 | 可见 | 可见 | 可见 |
+| 3D World | 可见 | 可见 | 可见 | 可见 |
+| Action | 可见 | 可见 | 可见 | 可见 |
+
+三个开关分别控制不同问题：
+
+- `joint_attention_visibility`：固定信息通路，训练和推理都生效。例如部分SFT配置关闭Action/3D对2D的读取。
+- `action_world_stream_mask`：训练时随机屏蔽Action对某个World分支的读取，用于依赖性消融；不等于删除该专家。
+- `knowledge_insulation`：控制机器人loss是否通过条件路径更新VLM。开启时隔离Flow/World梯度，VLM可由FAST/语言CE更新；关闭后允许联合优化，但实际可训练参数还取决于冻结开关。
+
+#### 3.3 独立的 34D 训练版本
+
+**本节仅适用于34D配方，不修改第1、2节的32D定义。** 代表配置为 [SGM action34 配方](../magicvla/configs/train/magicvla_sgm_pretrain_robot_group_23data_eo_action34_stride25.yaml)。多源数量应按启用条目与数据分片实际清点，不能只依据文件名。
+
+| 索引 | 34D版本语义 |
+|---|---|
+| `0:7`、`7` | 左臂最多7个joint、左gripper |
+| `8:15`、`15` | 右臂最多7个joint、右gripper |
+| `16:19`、`19:25` | 左EEF xyz、rotation-6D |
+| `25:28`、`28:34` | 右EEF xyz、rotation-6D |
+
+32D源经reader显式映射到上述槽位；6-joint双臂数据的额外joint槽 `6/14` 无效，人手数据的arm joint槽仍无效。归一化、rotation groups、gripper absolute规则和推理恢复均使用34D索引。32D/34D模型的输入输出形状不同，checkpoint与norm statistics不可直接混用。
+
+该代表配置使用50-step chunk、25帧anchor stride，EgoDex采用2倍语义上采样。Flow权重为1，FAST/2D/3D辅助权重启用调度：前20% 保持最大值，中间60% 余弦下降，最后20% 保持最小值。其余配方是否启用调度应分别读取配置。
+
+#### 3.4 推理与训练一致性
+
+推理关闭DINO/Track4World teacher的构造，保留学习到的2D/3D experts。固定观测下可缓存VLM prefix K/V；World和Action streams仍参与专家前向，不能直接沿用base的计算成本估计。
+
+动作从masked noise开始进行多步Euler更新，再按对应source的统计和delta/rotation规则恢复。维度mask、相机预处理、动作选择和checkpoint metadata必须一致；仅监督joint的配置不能用于未监督的EEF控制。`action14in32`、34D下的joint/EEF子集实验要分别说明槽位映射，不能按文件名推断。
+
+轨迹尾部也属于数据契约：SGM支持保留尾部anchor，以终止帧作为越界的World target；重复末动作的padding是否参与Flow loss由 `supervise_episode_end_padding` 控制。这与第2节原32D base配方的padding描述分别记录。
+
+#### 3.5 验证与代码入口
+
+验证分两层：单元/契约检查覆盖梯度路径、stream mask、teacher-free推理和动作恢复；能力评估比较action-only、加入2D/3D、不同可见关系及KI设置的闭环成功率与成本。open-loop动作误差和teacher latent loss只能作为诊断，不能替代闭环结果。
+
+- [模型实现](../magicvla/src/models/magicvla_sgm/modeling_magicvla_sgm.py)：`MagicVLASGMPolicy`、joint trunks与缓存推理。
+- [配置定义](../magicvla/src/models/magicvla_sgm/configuration_magicvla_sgm.py)：可见性、stream mask、辅助loss调度。
+- [Teacher 实现](../magicvla/src/models/magicvla_sgm/world_teachers.py)：DINOv3与Track4World目标。
+- [RoboDojo 服务](../magicvla/scripts/infer/robodojo_dynamic_server.py)：在线状态、图像与动作转换。
+
+<a id="magic-memory"></a>
+
+### 4. 后训练：memory 方向
+
+这一阶段的目标不是重新预训练VLA，而是以RoboDojo轨迹为数据，对已有base policy做后训练 / SFT，让模型在动作预测时利用当前帧以前的视觉信息。实验中既有Pi0.5，也有MagicVLA / Hy-VLA类基座的尝试；下文的脚本和源码路径以当前能核对到的Pi0.5、Hy-VLA实现为准。动作chunk、动作空间和flow-matching监督原则上保持不变，主要比较的是“历史信息放在哪里、怎样压缩、怎样注入动作专家”。
 
 三个方向可以按下面的关系来理解：
 
 | 方向 | 历史信息进入模型的位置 | 主要机制 | 当前状态 |
 |---|---|---|---|
-| Hy-VLA-style-mem | 视觉编码器内部 | 6 帧视频输入 + 时空注意力 | 已完成代码和 RoboDojo 后训练尝试 |
-| RoboMME FrameSamp+Modul | action expert | 均匀采样 / 首帧特征 + cross-attention + RMSNorm 调制 | 已完成多组采样与 keyframe ablation |
+| Hy-VLA-style-mem | 视觉编码器内部 | 6帧视频输入 + 时空注意力 | 已完成代码和RoboDojo后训练尝试 |
+| RoboMME FrameSamp+Modul | action expert | 均匀采样 / 首帧特征 + cross-attention + RMSNorm调制 | 已完成多组采样与keyframe ablation |
 | DM05-style memory | VLM prefix | 稀疏长历史帧 + SigLIP pooling | 正在验证 |
 
-#### 3.1 Hy-VLA-style-mem：把历史帧作为短视频输入视觉塔
+#### 4.1 Hy-VLA-style-mem：把历史帧作为短视频输入视觉塔
 
-**一句话原理：** 不把过去帧简单拼成更多语言 token，而是把同一相机的历史图像组成一个短视频，在视觉编码器中先做时间建模，再把融合后的当前帧特征交给后面的 VLM 和 action expert。
+**一句话原理：** 不把过去帧简单拼成更多语言token，而是把同一相机的历史图像组成一个短视频，在视觉编码器中先做时间建模，再把融合后的当前帧特征交给后面的VLM和action expert。
 
-**数据和输入。** 每个 RoboDojo 样本从当前时刻所在 episode 内取一个固定长度的图像窗口。代码配置为 `img_history_size=6`、`img_history_interval=20`，顺序是 oldest → current；严格按代码口径，6 帧总数包含最后的当前帧，可以在面试中概括为“把过去约 6 个时间点的图像历史送入模型”。训练时可以在每个时间间隔对应的小区间内采样，评估时使用确定的历史索引；episode 开头不足的部分会落到第 0 帧，并用 mask 标识无效历史。历史只来自当前 episode，不读取未来帧。
+**数据和输入。** 每个RoboDojo样本从当前时刻所在episode内取一个固定长度的图像窗口。代码配置为 `img_history_size=6`、`img_history_interval=20`，顺序是oldest → current；严格按代码口径，6帧总数包含最后的当前帧，可以在面试中概括为“把过去约6个时间点的图像历史送入模型”。训练时可以在每个时间间隔对应的小区间内采样，评估时使用确定的历史索引；episode开头不足的部分会落到第0帧，并用mask标识无效历史。历史只来自当前episode，不读取未来帧。
 
-**模型改动。** `Hy-Embodied-0.5-VLA` 对原视觉塔增加 video encoder 路径：输入从单帧 `(B,C,H,W)` 变为 `(B,K,C,H,W)`。在视觉 transformer 的部分 block 中插入 `SpaceTimeBlock`，先对同一空间 patch 沿时间做 causal attention，再做空间 attention，并加入时间 sinusoidal embedding；不同相机和不同空间位置不会互相混淆。经过指定层后只保留当前帧 token，历史信息已经在视觉塔内部汇入当前帧表示，因此下游 action expert 接口不需要改变。
+**模型改动。** `Hy-Embodied-0.5-VLA` 对原视觉塔增加video encoder路径：输入从单帧 `(B,C,H,W)` 变为 `(B,K,C,H,W)`。在视觉transformer的部分block中插入 `SpaceTimeBlock`，先对同一空间patch沿时间做causal attention，再做空间attention，并加入时间sinusoidal embedding；不同相机和不同空间位置不会互相混淆。经过指定层后只保留当前帧token，历史信息已经在视觉塔内部汇入当前帧表示，因此下游action expert接口不需要改变。
 
-**为什么这样设计。** 视觉侧时空注意力适合捕捉遮挡前后的物体位置、运动方向和接触过程，同时通过“中间融合、末端只保留当前帧”控制 token 数和后续计算量。它的局限是窗口较短，主要解决短时动态和当前帧歧义，不负责跨 episode 的长期任务记忆；而且历史帧会直接增加视觉塔前段的计算和显存。
+**为什么这样设计。** 视觉侧时空注意力适合捕捉遮挡前后的物体位置、运动方向和接触过程，同时通过“中间融合、末端只保留当前帧”控制token数和后续计算量。它的局限是窗口较短，主要解决短时动态和当前帧歧义，不负责跨episode的长期任务记忆；而且历史帧会直接增加视觉塔前段的计算和显存。
 
-**面试表述：** “我在 Hy-VLA 分支上做了 RoboDojo 后训练，把每个相机的当前帧和过去 5 个采样时刻组成 6 帧短视频，在视觉 encoder 的部分层加入时空 attention。时间 attention 使用 causal mask，保证当前只能看过去；后面丢弃历史 token，只保留当前帧的融合特征，所以不改 action expert 和动作输出接口。”
+**面试表述：** “我在Hy-VLA分支上做了RoboDojo后训练，把每个相机的当前帧和过去5个采样时刻组成6帧短视频，在视觉encoder的部分层加入时空attention。时间attention使用causal mask，保证当前只能看过去；后面丢弃历史token，只保留当前帧的融合特征，所以不改action expert和动作输出接口。”
 
-#### 3.2 RoboMME FrameSamp+Modul：离线特征采样，再调制 action expert
+#### 4.2 RoboMME FrameSamp+Modul：离线特征采样，再调制 action expert
 
-**一句话原理：** 先用冻结的视觉塔离线提取整条 episode 的 `cam_high` 特征，训练样本只取其中一部分历史帧；再把历史视觉特征和时空位置编码投影成 memory token，让 action token cross-attend 到 memory，并用 memory 产生的 scale / shift 调制 action expert 的 RMSNorm。
+基础查阅：[Cross-Attention](Note_Basics.md#basic-cross-attention)、[RMSNorm](Note_Basics.md#basic-rmsnorm)。
 
-**历史采样。** `frame_memory.py` 中的 `even_sampling_indices()` 在当前帧之前的 episode 前缀上均匀取样，并尽量包含首帧和当前帧；`framesamp_budget` 固定 memory token 总预算，未使用位置右侧 padding 并由 `static_mask` 屏蔽。标准 `framesamp_modul` 配置通常是 `budget=512`、每帧 16 个 token，也就是最多约 32 个采样帧；历史视觉特征保存在 `framesamp_features` 中，训练时不再重复跑历史图像的视觉 encoder。当前三路相机仍走 Pi0.5 的普通输入路径，memory 主要来自 top-head / `cam_high`。
+**一句话原理：** 先用冻结的视觉塔离线提取整条episode的 `cam_high` 特征，训练样本只取其中一部分历史帧；再把历史视觉特征和时空位置编码投影成memory token，让action token cross-attend到memory，并用memory产生的scale / shift调制action expert的RMSNorm。
 
-在此基础上做了两类 ablation：
+**历史采样。** `frame_memory.py` 中的 `even_sampling_indices()` 在episode起点至当前帧的闭区间内均匀取样，包含首帧和当前帧；`framesamp_budget` 固定memory token总预算，未使用位置右侧padding并由 `static_mask` 屏蔽。标准 `framesamp_modul` 配置通常是 `budget=512`、每帧16个token，也就是最多约32个采样帧；历史视觉特征保存在 `framesamp_features` 中，训练时不再重复跑历史图像的视觉encoder。当前三路相机仍走Pi0.5的普通输入路径，memory主要来自top-head / `cam_high`。
 
-- **加入首帧：** 使用 `framesamp_sampling_strategy="first_frame"`，只提供 episode 的第 0 帧。`train_robodojo_mem_keyframe_256.sh` 对应的 `pi05_robodojo_mem_keyframe_256_v2` 配置使用 256 个 token、每帧 256 个 token，即用一张未做空间 pooling 的首帧作为 memory；它重点验证“任务初始场景 / 初始物体信息”是否比长历史更有用。
-- **提高 keyframe 采样比例：** 在数据采样层读取 `is_key_frame`，通过 `keyframe_mode="boost"` 提高关键帧权重，同时仍保留普通帧，避免模型只看到关键帧。不同实验中尝试过 `keyframe_boost=2` 和 v2 中的 `15`；这改变的是训练样本分布，不改变单个样本的动作监督。
+在此基础上做了两类ablation：
 
-**模型注入。** 每个采样帧的视觉 embedding 与 3D sinusoidal temporal/spatial position embedding 拼接，再经过 `PerceptualMemory` 投影到 action expert 的 hidden size。Gemma action 分支在 transformer block 中对 memory 做 cross-attention；得到的 memory condition 继续经过 `MemoryRMSNorm` 生成 scale 和 shift，调制 action expert 的 FFN 输入。也就是说，历史不直接塞进 VLM 的主 prefix，而是作为 action expert 生成动作时的额外条件；`action_horizon`、动作维度和 flow-matching loss 都不变。
+- **加入首帧：** 使用 `framesamp_sampling_strategy="first_frame"`，只提供episode的第0帧。`train_robodojo_mem_keyframe_256.sh` 对应的 `pi05_robodojo_mem_keyframe_256_v2` 配置使用256个token、每帧256个token，即用一张未做空间pooling的首帧作为memory；它重点验证“任务初始场景 / 初始物体信息”是否比长历史更有用。
+- **提高keyframe采样比例：** 在数据采样层读取 `is_key_frame`，通过 `keyframe_mode="boost"` 提高关键帧权重，同时仍保留普通帧，避免模型只看到关键帧。不同实验中尝试过 `keyframe_boost=2` 和v2中的 `15`；这改变的是训练样本分布，不改变单个样本的动作监督。
 
-**优缺点。** 这种方式把历史视觉计算离线化，并用固定 token budget 控制训练成本；memory 与动作分支直接交互，适合需要根据过去观测选择动作的任务。代价是需要维护 episode 级 feature cache、采样索引、位置编码和 padding mask 的一致性；如果只提高 keyframe 权重，也可能损失普通过渡状态，因此必须与均匀采样和 current-only 做对比。
+**模型注入。** 每个采样帧的视觉embedding与3D sinusoidal temporal/spatial position embedding拼接，再经过 `PerceptualMemory` 投影到action expert的hidden size。Gemma action分支在transformer block中对memory做cross-attention；得到的memory condition继续经过 `MemoryRMSNorm` 生成scale和shift，调制action expert的FFN输入。也就是说，历史不直接塞进VLM的主prefix，而是作为action expert生成动作时的额外条件；`action_horizon`、动作维度和flow-matching loss都不变。
 
-**面试表述：** “我复现并扩展了 RoboMME 的 FrameSamp+Modul。历史帧先用 base Pi0.5 的 SigLIP 离线编码，在线只读取固定预算的历史 token；模型用时空位置编码区分帧和空间位置，再让 action expert cross-attend 这些 memory，并通过 RMSNorm 的 scale/shift 做调制。我还比较了均匀历史、只加首帧，以及提高 `is_key_frame` 采样权重三种数据策略。”
+**优缺点。** 这种方式把历史视觉计算离线化，并用固定token budget控制训练成本；memory与动作分支直接交互，适合需要根据过去观测选择动作的任务。代价是需要维护episode级feature cache、采样索引、位置编码和padding mask的一致性；如果只提高keyframe权重，也可能损失普通过渡状态，因此必须与均匀采样和current-only做对比。
 
-#### 3.3 DM05-style memory：稀疏长历史作为 VLM prefix（正在验证）
+**面试表述：** “我复现并扩展了RoboMME的FrameSamp+Modul。历史帧先用base Pi0.5的SigLIP离线编码，在线只读取固定预算的历史token；模型用时空位置编码区分帧和空间位置，再让action expert cross-attend这些memory，并通过RMSNorm的scale/shift做调制。我还比较了均匀历史、只加首帧，以及提高 `is_key_frame` 采样权重三种数据策略。”
 
-**一句话原理：** 不只看短窗口，而是在同一个 episode 内按较大的时间间隔抽取一段严格过去的 top-head 图像，把每帧压缩成少量视觉 token 后，和当前图像、语言一起放入 VLM prefix，让模型在生成动作前形成更长时间尺度的场景状态表示。
+#### 4.3 DM05-style memory：稀疏长历史作为 VLM prefix
 
-**当前实现。** `train_robodojo_official_100_cover_blocks_dm05style_mem.sh` 使用 Pi0.5，在 RoboDojo 官方 100 个 cover-blocks episode 上训练。配置为 `history_frames=20`、`history_stride=25`：每个当前样本携带 20 张严格过去的 `cam_high` 帧，时间间隔为 25 个 action step，当前帧仍由普通相机输入提供。每张历史帧经过共享 SigLIP 后，将视觉 token grid 做参数无关的 4×4 average pooling，变成每帧 16 个 token，总共 320 个 history token；`history_is_pad` 用来屏蔽 episode 开头不存在的历史。
+**一句话原理：** 不只看短窗口，而是在同一个episode内按较大的时间间隔抽取一段严格过去的top-head图像，把每帧压缩成少量视觉token后，和当前图像、语言一起放入VLM prefix，让模型在生成动作前形成更长时间尺度的场景状态表示。
 
-**与前两个方向的区别。** 这里历史 token 直接追加到 VLM prefix，与当前图像和语言共同参与 prefix attention，再由 action expert 使用最终的条件表示；它不是 FrameSamp 那种只在 action expert 内部 cross-attend 的 memory，也不是 Hy-VLA 那种在视觉塔内部做时空 attention。它更强调“记住较长时间范围内的任务状态”，例如物体在早期出现过什么、任务进度如何，而不是只恢复当前帧附近的运动细节。
+**当前实现。** 以 `kai0-robodojo-dm05style-mem/train_robodojo_5tasks_dm05style_mem_20_25_keyframe_boost25.sh` 对应的Pi0.5五任务配置为例，参数为 `history_frames=20`、`history_stride=25`：每个当前样本携带20张严格过去的 `cam_high` 帧，时间间隔为25个action step，当前帧仍由普通相机输入提供。每张历史帧经过共享SigLIP后，将视觉token grid平均池化到4×4网格，变成每帧16个token，总共320个history token；`history_is_pad` 用来屏蔽episode开头不存在的历史。
 
-**当前状态和风险。** 该方向正在验证，暂时不提前宣称已经带来收益。主要需要检查长历史 token 是否挤压当前图像 / 语言的有效上下文、padding mask 是否正确，以及稀疏采样间隔是否适合不同任务；后续应至少做 current-only、短历史、20 帧历史和不同 pooling 比较，并观察动作成功率与长时任务表现。
+**与前两个方向的区别。** 这里历史token直接追加到VLM prefix，与当前图像和语言共同参与prefix attention，再由action expert使用最终的条件表示；它不是FrameSamp那种只在action expert内部cross-attend的memory，也不是Hy-VLA那种在视觉塔内部做时空attention。它更强调“记住较长时间范围内的任务状态”，例如物体在早期出现过什么、任务进度如何，而不是只恢复当前帧附近的运动细节。
 
-**面试表述：** “我正在验证一个 DM05-style 的长时 memory 方案：在官方 100 个 RoboDojo cover-blocks episode 上，从当前帧向前每隔 25 个 action step 取 20 帧 top-head 图像，用共享 SigLIP 编码并做 4×4 pooling，得到 320 个 history token，和当前视觉、语言一起作为 Pi0.5 的 prefix。它的目标是让模型保留早期物体和任务状态信息，目前还在做 ablation 和效果验证。”
+**验证重点。** 该方向已有实现与实验配置，闭环收益仍需对应评估记录支持。主要需要检查长历史token是否挤压当前图像 / 语言的有效上下文、padding mask是否正确，以及稀疏采样间隔是否适合不同任务；后续应至少做current-only、短历史、20帧历史和不同pooling比较，并观察动作成功率与长时任务表现。
 
-#### 3.4 三个方向的统一训练和比较方法
+**实验边界。** 仓库已有多任务和keyframe boost配置；配置存在不等于效果已验证。20帧、stride=25覆盖最远500个数据帧，秒数需按数据FPS换算。闭环收益以对应checkpoint、任务和评估记录为准。
 
-三个方向都从已有 base checkpoint 初始化，在 RoboDojo 轨迹上预测当前时刻开始的 action chunk。Memory 只改变观测条件的组织方式，不改变动作空间和主要监督，因此可以用 current-only baseline 做相对公平的比较。面试中可以按四个维度总结：
+#### 4.4 三个方向的统一训练和比较方法
 
-- **信息放置位置：** Hy-VLA 放在 vision encoder 内，FrameSamp+Modul 放在 action expert，DM05-style 放在 VLM prefix。
-- **时间范围：** Hy-VLA 是短时密集窗口，FrameSamp 是固定预算的可配置采样，DM05-style 是稀疏但更长的历史。
-- **计算方式：** Hy-VLA 在线参与视觉前向；FrameSamp 历史特征离线缓存；DM05-style 仍需对历史图像做 SigLIP 编码，但通过 pooling 控制 token 数。
-- **适用问题：** 短时遮挡 / 运动趋势更适合 Hy-VLA，首帧或关键历史条件更适合 FrameSamp，跨较长时间的物体与任务状态更适合 DM05-style。
+先区分两个采样层次：history sampling决定单个样本读取哪些历史，`keyframe_boost` 决定哪些当前anchor更常被训练。FrameSamp的均匀采样包含当前帧，DM05的历史分支只取严格过去帧，两者都不能读取未来。
 
-最重要的工程契约是：历史帧索引不能读到未来，训练和推理的时间顺序必须一致，首帧 padding 要有 mask，token budget / pooling / position embedding 必须与 checkpoint 配套；否则 loss 可能正常下降，但部署时模型看到的 memory 与训练语义不一致。
+三个方向都从已有base checkpoint初始化，在RoboDojo轨迹上预测当前时刻开始的action chunk。应在同一基座、数据划分、动作契约和训练预算下，各自对比current-only baseline；跨基座结果不能直接归因于memory。面试中可以按四个维度总结：
 
-## 3.5 VLA/Transformer 基础手撕模块
-### 1. Self-Attention
+- **信息放置位置：** Hy-VLA放在vision encoder内，FrameSamp+Modul放在action expert，DM05-style放在VLM prefix。
+- **时间范围：** Hy-VLA是短时密集窗口，FrameSamp是固定预算的可配置采样，DM05-style是稀疏但更长的历史。
+- **计算方式：** Hy-VLA在线参与视觉前向；FrameSamp历史特征离线缓存；DM05-style仍需对历史图像做SigLIP编码，但通过pooling控制token数。
+- **验证目标：** 分别检查短时遮挡/运动趋势、首帧信息回忆、长时物体与任务状态记忆；这些是实验假设，需通过成功率和历史屏蔽/打乱对照验证。
 
-Self-Attention 让序列中的每个 token 根据其他 token 的信息更新自身表示。输入为 `X ∈ R^{B×L×D}`，先通过三个线性层得到 Query、Key 和 Value：
+比较时记录任务成功率、跨seed波动、推理延迟、峰值显存和实际history token数；缺少结果时标为待验证。
 
-$$
-Q=XW_Q,\quad K=XW_K,\quad V=XW_V
-$$
+最重要的工程契约是：历史帧索引不能读到未来，训练和推理的时间顺序必须一致，首帧padding要有mask，token budget / pooling / position embedding必须与checkpoint配套；否则loss可能正常下降，但部署时模型看到的memory与训练语义不一致。
 
-注意力计算为：
+代码入口：[DM05 历史视觉 token](../kai0-robodojo-dm05style-mem/src/openpi/models/pi0.py)、[五任务实验脚本](../kai0-robodojo-dm05style-mem/train_robodojo_5tasks_dm05style_mem_20_25_keyframe_boost25.sh)、[FrameSamp 采样与特征组织](../kai0-robodojo-frame-mem/src/openpi/models/frame_memory.py)。
 
-$$
-S=\frac{QK^T}{\sqrt{d_k}},\quad A=\operatorname{softmax}(S+M),\quad Y=AV
-$$
+基础公式与最小实现见 [基础知识：VLA / Transformer 模块](Note_Basics.md#basic-vla)。
 
-其中 `M` 是 attention mask，最后通常再经过一个输出投影 `W_O`。
+<a id="interviews"></a>
 
-```python
-def self_attention(x, w_q, w_k, w_v, w_o, mask=None):
-    q = x @ w_q
-    k = x @ w_k
-    v = x @ w_v
-    score = q @ k.transpose(-2, -1) / math.sqrt(q.shape[-1])
-    if mask is not None:
-        score = score.masked_fill(~mask, float("-inf"))
-    weight = torch.softmax(score, dim=-1)
-    return (weight @ v) @ w_o
-```
-
-在 MagicVLA 中，Qwen 的 full-attention 层以及 Action Expert 的 `QwenJointFullAttention` 都建立在这个公式上。
-
-### 2. Masked Attention
-
-Mask 的作用是限制某个 Query 可以读取哪些 Key。常见类型有：
-
-- **Causal mask**：当前位置不能读取未来 token，用于语言模型；
-- **Padding mask**：忽略补齐位置；
-- **非对称 mask**：不同模态之间采用不同的可见性。
-
-MagicVLA 的 full-attention 逻辑可以概括为：
-
-```text
-VLM query     -> 只能读取 VLM prefix
-Action query  -> 可以读取 VLM prefix 和整个 action chunk
-```
-
-因此 VLM 不会读取 noisy action，避免动作噪声污染视觉语言表示；Action Expert 可以使用完整的视觉语言条件和 action chunk 内部信息。
-
-最小的 masked attention 写法如下：
-
-```python
-score = q @ k.transpose(-2, -1) / math.sqrt(d)
-score = score.masked_fill(~allowed, float("-inf"))
-attn = torch.softmax(score, dim=-1)
-out = attn @ v
-```
-
-### 3. RMSNorm
-
-RMSNorm 只根据均方根缩放特征，不计算均值：
-
-$$
-\operatorname{RMS}(x)=\sqrt{\frac{1}{D}\sum_{i=1}^{D}x_i^2+\epsilon}
-$$
-
-$$
-\operatorname{RMSNorm}(x)=\frac{x}{\operatorname{RMS}(x)}\odot\gamma
-$$
-
-最小实现：
-
-```python
-def rms_norm(x, weight, eps=1e-6):
-    rms = torch.sqrt(x.float().square().mean(-1, keepdim=True) + eps)
-    return (x.float() / rms * weight.float()).to(x.dtype)
-```
-
-MagicVLA 的 `QwenRMSNorm` 使用 `1 + weight` 作为缩放因子，使参数初始化为 0 时接近恒等映射。
-
-### 4. SwiGLU
-
-SwiGLU 是 Qwen 使用的 MLP 结构，由 gate 分支、up 分支和 down 分支组成：
-
-$$
-\operatorname{SwiGLU}(x)=\left[\operatorname{SiLU}(xW_g)\odot(xW_u)\right]W_d
-$$
-
-```python
-def swiglu(x, gate_proj, up_proj, down_proj):
-    gate = torch.nn.functional.silu(gate_proj(x))
-    up = up_proj(x)
-    return down_proj(gate * up)
-```
-
-在 Action Expert 中，当前维度大致是：
-
-```text
-1024 -> 3072 -> 1024
-```
-
-它替代普通的 `Linear -> GELU -> Linear`，通过 gate 控制不同特征的保留程度。
-
-### 5. RoPE
-
-RoPE 通过旋转 Query 和 Key 来编码位置信息。二维形式为：
-
-$$
-\begin{bmatrix}x_1'\\x_2'\end{bmatrix}
-=
-\begin{bmatrix}\cos\theta & -\sin\theta\\
-\sin\theta & \cos\theta\end{bmatrix}
-\begin{bmatrix}x_1\\x_2\end{bmatrix}
-$$
-
-其中 `θ` 由 token 的位置决定。对 Q、K 同时施加旋转后，内积自然包含相对位置信息。
-
-```python
-def apply_rope(x, cos, sin):
-    x1, x2 = x.chunk(2, dim=-1)
-    rotated = torch.cat([-x2, x1], dim=-1)
-    return x * cos + rotated * sin
-```
-
-MagicVLA 使用 Qwen 的 RoPE。图像侧使用多模态的 3D position id，动作 token 则使用连续的 action position；这样模型可以区分不同时间步的动作以及图像中的空间位置。
-
-### 6. Flow Matching
-
-Flow Matching 让模型学习从噪声动作到真实动作的连续变化方向。设真实动作为 `x_0`，随机噪声为 `ε`，随机时间为 `t∈[0,1]`：
-
-$$
-x_t=(1-t)x_0+t\epsilon
-$$
-
-对于线性路径，目标速度为：
-
-$$
-u_t=\frac{dx_t}{dt}=\epsilon-x_0
-$$
-
-模型输入带噪动作 `x_t`、时间 `t`、state 和 VLM 条件，输出预测速度：
-
-```python
-noisy_action = (1 - t) * action + t * noise
-target_velocity = noise - action
-pred_velocity = action_expert(noisy_action, t, state, vlm_context)
-```
-
-推理时从高斯噪声开始，沿反方向用 Euler 方法逐步更新：
-
-```python
-action = torch.randn_like(action)
-for _ in range(num_steps):
-    velocity = model(action, time, condition)
-    action = action - velocity / num_steps
-```
-
-### 7. Masked MSE
-
-MagicVLA 的主要动作损失是预测速度和目标速度之间的均方误差：
-
-$$
-L_{MSE}=\frac{1}{N}\sum_i m_i(\hat{v}_i-v_i)^2
-$$
-
-其中 `m_i` 表示该动作元素是否有效。项目中需要同时考虑 action padding 和动作维度 mask：
-
-```python
-valid = (
-    ~action_is_pad.unsqueeze(-1)
-) & action_dim_mask
-
-error = (pred_velocity - target_velocity).square()
-loss = (error * valid).sum() / valid.sum().clamp_min(1)
-```
-
-这样可以避免：
-
-- episode 末尾补齐的动作参与训练；
-- 不存在的机器人维度参与训练；
-- 缺失动作被错误当成真实的 0。
-
-### 8. Cross-Attention
-
-Cross-Attention 和 Self-Attention 的区别是：Query 和 Key/Value 来自不同序列。
-
-```text
-Query：当前 action token
-Key/Value：历史 memory token
-```
-
-公式为：
-
-$$
-Q=X_{current}W_Q,\quad K=X_{memory}W_K,\quad V=X_{memory}W_V
-$$
-
-$$
-Y=\operatorname{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V
-$$
-
-最小实现：
-
-```python
-def cross_attention(query, memory, w_q, w_k, w_v):
-    q = query @ w_q
-    k = memory @ w_k
-    v = memory @ w_v
-    weight = torch.softmax(
-        q @ k.transpose(-2, -1) / math.sqrt(q.shape[-1]),
-        dim=-1,
-    )
-    return weight @ v
-```
-
-在 RoboMME-style memory 中，Action Expert 用当前动作特征作为 Query，历史视觉特征作为 Key/Value；在 MagicVLA Base 中，类似的条件读取发生在 full-attention 层，只是 Action Expert 同时读取 VLM prefix 和 action chunk。
-
-# 三、面试复盘
+# 二、面试复盘
 
 ## 25.10.10 海恒智能 机械臂算法工程师
+
 ### 1. ros加moveit2 怎么做一些完整的运动规划和控制？
 
 整个链路分四层：模型 → 感知 → 规划 → 控制。
 
 **1) 机器人模型与配置**
+
 - **URDF**：机器人描述文件，定义几何结构、关节、连杆、传感器。
-- **SRDF**：MoveIt2 自动生成，在 URDF 基础上加语义信息（规划组、虚拟关节、碰撞对白名单等）。
+- **SRDF**：MoveIt2自动生成，在URDF基础上加语义信息（规划组、虚拟关节、碰撞对白名单等）。
 
 **2) 感知与环境建模**
-- **传感器数据**：订阅深度相机（如 Kinect）、激光雷达的点云。
-- **环境表示**：Costmap，通常订阅 ROS2 话题实时更新。
+
+- **传感器数据**：订阅深度相机（如Kinect）、激光雷达的点云。
+- **环境表示**：Costmap，通常订阅ROS2话题实时更新。
 
 **3) 运动规划（Motion Planning）**
 
 规划请求（Planning Request）包含：
+
 - **起始状态**：机器人当前关节角度
 - **目标状态**：目标末端位姿或目标关节角度
 - **路径约束**：例如保持末端姿态不变
 - **障碍物信息**：来自环境建模
 
-规划器（Planners）：MoveIt2 集成了多种算法，包括采样式（RRT/RRT* 等）和优化式（CHOMP/TrajOpt 等）。
+规划器（Planners）：MoveIt2集成了多种算法，包括采样式（RRT/RRT* 等）和优化式（CHOMP/TrajOpt等）。
 
-逆运动学求解器（IK Solvers）：规划过程中频繁调用，把末端目标位姿反解成关节角度。MoveIt2 默认使用 KDL 或 TRAC-IK。
+逆运动学求解器（IK Solvers）：规划过程中频繁调用，把末端目标位姿反解成关节角度。MoveIt2默认使用KDL或TRAC-IK。
 
 **项目中的体现**：
+
 - `panda_pick_n_place.py` 中 `self._panda.solve_ik(self._end_effector_target)` 直接计算关节目标；
-- 也可以通过 `move_group` 接口发送规划请求，由 MoveIt2 自动选规划器并生成轨迹。
+- 也可以通过 `move_group` 接口发送规划请求，由MoveIt2自动选规划器并生成轨迹。
 
 **4) 控制层**
-最终轨迹经 `ros2_control` 下发给各 controller（关节位置 / 力矩等），驱动真实或仿真机器人执行。
+最终轨迹经 `ros2_control` 下发给各controller（关节位置 / 力矩等），驱动真实或仿真机器人执行。
 ### 2. opencv中使用了哪一些算法？
 1）边缘检测（比如 Canny）找出墙面上的“线条”
 2）轮廓检测（findContours）找出抹头的边缘位置  <!-- TODO: 确认「抹头」是否应为「抹布头」或具体物体名 -->
 3）霍夫直线变换（Hough Lines）拟合出这两条线的角度
+
+
 ### 3. CAN通信两个节点在主线上无法通信，怎么排查问题？
+
 1）从软件角度：工作中遇到的实际bug案例，调度代码里面屏蔽了
 2）硬件角度：示波器看差分波形，看看显性隐性电平对不对；监听抓ACK故障位
+
 ### 4. 之前项目使用的CAN通信波特率是多少？
-500 kbit/s 注意单位
+
+500 kbit/s注意单位
+
 ### 5. 多个模块在ROS中，是怎么管理的？
+
 1）引入组件（Component）机制，通过rclcpp_components实现运行时动态加载节点为共享库
 2）Docker容器化
+
 ### 6. 节点启动是怎么做的？
+
 launch文件
+
 ### 7. ROS的通讯机制是什么？（分布式）
+
 分布式、异步、多对多
+
 ### 8. PID的三个字母分别代表什么意思？有什么作用？
+
 P：比例，消除当前误差；
 I：积分，消除稳态残差；
 D：微分，预测未来误差变化，抑制超调。
@@ -1861,173 +1125,248 @@ D：微分，预测未来误差变化，抑制超调。
 
 | 维度 | PID | 模糊控制 |
 |---|---|---|
-| 原理 | 线性反馈：误差的 P / I / D 三项加权求和作为控制量 | 基于模糊逻辑：误差与误差变化率模糊化（"正大""负小"...）→ 规则库推理 → 解模糊化输出 |
-| 模型依赖 | 需要较精确的系统模型 | 不依赖精确模型 |
+| 原理 | 线性反馈：误差的P / I / D三项加权求和作为控制量 | 基于模糊逻辑：误差与误差变化率模糊化（"正大""负小"...）→ 规则库推理 → 解模糊化输出 |
+| 模型依赖 | 可通过实验整定；模型有助于分析与调参 | 可用经验规则，不要求精确解析模型 |
 | 优点 | 结构简单、响应快、稳定性好 | 鲁棒性强、贴近人类经验 |
 | 缺点 | 对系统模型和参数变化敏感 | 规则设计依赖经验，调试复杂 |
 | 适用场景 | 模型明确、线性、控制精度要求高 | 非线性、时变、难建模、不确定性高 |
 
-**选型一句话**：模型清楚选 PID，模型不清楚选模糊控制。
+**选型思路**：结合控制目标、非线性程度、测量噪声和调参成本选择；有无精确模型不是唯一标准。
 
 ### 10. 机械臂出现轨迹抖动，或者说关节不连续，有可能是因为什么原因造成的？
+
 1）轨迹规划层（Trajectory Planning）
-- 轨迹平滑性不足（路径不连续或加速度跳变），贝塞尔曲线 B样条插值
-- 逆运动学（IK）求解不稳定，对于冗余自由度机械臂 IK 解不唯一，导致奇异点附近IK解算器输出跳变
+
+- 轨迹平滑性不足（路径不连续或加速度跳变），贝塞尔曲线B样条插值
+- 逆运动学（IK）求解不稳定，对于冗余自由度机械臂IK解不唯一，导致奇异点附近IK解算器输出跳变
 2）运动控制层（Motion Control）
+
 -  控制器增益设置不当（PID / 力矩环震荡）
 现象：关节在目标位置附近高频抖动（小幅度振荡），尤其在低速或静止时明显。
-原因：位置环或速度环 PID 增益过高，导致系统震荡；力矩环带宽过高，激发结构柔性模态；未做摩擦补偿或前馈控制，导致稳态误差 + 积分饱和。
+原因：位置环或速度环PID增益过高，导致系统震荡；力矩环带宽过高，激发结构柔性模态；未做摩擦补偿或前馈控制，导致稳态误差 + 积分饱和。
+
 - 采样频率不一致或通信延迟
+
 ### 11. 如果是关节的解不是唯一的，这个时候应该怎么做？
+
 关节限位 + 避障代价
+
 ### 12. Docker的主要步骤
+
 - 1.创建Dockerfile ：定义基础镜像、安装依赖、配置环境变量等
-- 2.编写启动脚本 ：在项目中有 docker/entrypoint.bash ，用于容器启动时执行的命令 
+- 2.编写启动脚本 ：在项目中有docker/entrypoint.bash ，用于容器启动时执行的命令 
 设置ROS2环境变量、构建工作空间、启动相关节点
-- 3.运行脚本 ： docker/run.bash 用于简化Docker容器的启动
+
+- 3.运行脚本 ： docker/run.bash用于简化Docker容器的启动
 这种方式的优点是：
+
 - 环境一致性：所有开发者使用相同的环境
 - 依赖隔离：避免系统依赖冲突
 - 便于部署：可以轻松在不同机器上运行
+
 ### 13. git基本操作
-> TODO: 补充常用操作（add / commit / branch / rebase / cherry-pick / reset 三种区别）。
+
+常用指令：
+
+| 指令 | 用途 |
+|---|---|
+| `git clone <url>` | 下载仓库 |
+| `git status` / `git diff` | 查看修改状态和未暂存差异 |
+| `git add <file>` | 将文件修改加入暂存区 |
+| `git commit -m "说明"` | 提交暂存区内容 |
+| `git log --oneline -n 10` | 查看最近提交 |
+| `git switch -c <branch>` / `git switch <branch>` | 新建并切换分支 / 切换已有分支 |
+| `git fetch` / `git pull` | 获取远端更新 / 获取并整合更新 |
+| `git push` | 推送本地提交 |
+| `git merge <branch>` | 合并另一分支 |
+| `git cherry-pick <commit>` | 应用指定提交 |
+| `git stash push` / `git stash pop` | 临时保存 / 恢复未提交修改 |
+| `git restore --staged <file>` | 取消暂存，保留工作区修改 |
+| `git revert <commit>` | 新建提交，撤销某次提交的效果 |
+
+`git restore <file>`会丢弃该文件未暂存的修改；`git reset --hard`会丢弃已跟踪文件的未提交修改，使用前先确认需要保留的内容。
 
 ## 26.1.26 iData具身智能算法
+
 ### 1. 手眼标定相关，怎么校准，有没有自动校准
-- 手眼标定的基本原则，深度不变，尽量多角度
+
+采集机器人与标定板在多种位置、姿态下的观测，求解相机与机器人之间的固定变换，再用未参与求解的数据检查误差。采样要有足够的平移与旋转变化，不能只固定深度或沿单一轴运动。原理见[相机与手眼标定](Note_Basics.md#basic-calibration)。
+
 ### 2. 为什么用五次多项式，和三次多项式比有什么优点
+
+基础查阅：[轨迹与控制](Note_Basics.md#basic-control)。
+
 - 选五次多项式的核心是补齐了加速度的边界约束，实现位-速-加全连续：三次多项式仅能约束位、速，加速度无约束导致拼接处跳变，有硬件冲击
-- 五次多项式多2个加速度约束，从根源消除了突变，跃度也连续可优化，运动更平滑，同时避开了高阶多项式的龙格现象和高求解成本，是工程上平滑性和效率的最优选择，也是机器人、自动驾驶轨迹规划的标配。
+- 五次多项式可同时约束两端的位置、速度和加速度。多段轨迹在边界条件匹配时可保持加速度连续，但不会自动保证段间jerk连续；若需限制jerk，应额外设计约束或采用相应轨迹生成方法。
 
 ### 4. VLA和传统的规控相比有什么优势？
+
 - 传统规控感知、决策控制分离，依赖精确的运动学动力学模型，PID,MPC
 - VLA端到端策略，泛化性好(相对来说)，多模态数据，预训练大模型
+
 ### 5. 脚部电机互斥机制是什么，怎么实现的
+
 - 通过标志位实现腿部电机和手臂电机的双向互斥，确保二者不能同时运动。
+
 ### 6. rl训练大概做了什么？奖励函数怎么设定的？
-> TODO: 参考前文「RL 项目实践复盘」中 Lift / Grasp & Pull 的奖励设计（接近、对齐、抬升、终止惩罚、Curriculum）。
+
+主要在Isaac Lab中用PPO做机械臂抓取任务，从Lift扩展到Grasp & Pull，重点是观测设计、奖励调整和失败分析。
+
+奖励按任务过程组织：接近物体、姿态对齐、抬升或拉到目标位置，并加入动作平滑等约束。训练中检查是否出现“靠近但不抓”“完成后继续抬升”等奖励投机，再调整权重或让阶段奖励在完成后衰减。Curriculum用于逐步增加难度，效果结合成功率和实际轨迹判断。
+
+具体过程见[RL项目实践](Note_OtherProjects.md#rl-project)，通用原理见[RL基础](Note_Basics.md#basic-rl)。
 
 ### 7. sim2real中的难点是什么，会存在哪些问题，应该怎么解决？
+
 - 物理误差：摩擦系数、关节间隙、电机延迟、力控精度误差、环境扰动（如气流、震动、光照变化）
 - 视觉误差：仿真画面无噪点、无运动模糊，真实相机有曝光、白平衡、畸变；仿真物体纹理单一，真实世界有反光、阴影、遮挡
-- 动作误差：动作执行有延迟比如指令移动 10cm，实际只动 9.5cm）；反馈信号（如力传感器、视觉反馈）有噪声、采样延迟
+- 动作误差：动作执行有延迟比如指令移动10cm，实际只动9.5cm）；反馈信号（如力传感器、视觉反馈）有噪声、采样延迟
 - 解决方法：
     1.域随机化（Domain Randomization）
     2.域适应（Domain Adaptation）
+
 ### 8. 机械臂做路径规划的时候，怎么避免碰撞的
-- urdf中增加限位
-- 笛卡尔路径规划
+
+先在规划场景中建立机器人、障碍物和自碰撞模型，再对候选路径及插值轨迹做碰撞检查。关节限位只限制可达范围，笛卡尔插值也不自动保证无碰撞；执行前还要检查速度、加速度和环境变化。
 
 ## 26.2.11 星尘智能
+
 ### 1. go函数里面的原理？笛卡尔路径规划的原理？
+
 - go() = plan() + execute()
     plan路径规划，OMPL(RRTconnect)
     execute执行规划好的路径
     包含碰撞、逆运动学KDL、执行控制
 - 笛卡尔路径：
     线性插值+ik解算
+
 ### 2. RL相关知识 什么是离线学习，什么是在线学习，大概各自的算法有哪些？
+
 - 在线强化学习（Online RL）：智能体一边和环境交互，一边学习，用的是自己刚产生的新数据。PPO、SAC、TD3
 - 离线强化学习（Offline RL）：只用现成的数据集学习，不和环境交互。CQL、IQL、TD3+BC
+
 ### 3. VLA数据有什么采集方法？
-- 遥操作，通过手柄 / VR / 键盘 / 鼠标远程操控机器人，同步采集相机图像流、语言指令、机器人关节动作序列，事后自动标注或人工补语言描述 OpenVLA
+
+- 遥操作，通过手柄 / VR / 键盘 / 鼠标远程操控机器人，同步采集相机图像流、语言指令、机器人关节动作序列，事后自动标注或人工补语言描述OpenVLA
 - 仿真数据采集
+
 ### 4. 逆运动学解算的原理是什么？用的什么方法？
+
+基础查阅：[IK 原理](Note_Basics.md#basic-ik)。
+
 - 逆运动学：已知末端位姿，求关节角。解算本质是解非线性方程组。
     1.解析法：快、专用、靠几何推导
     2.数值法：通用、迭代、靠雅可比 / 优化
-- 6轴工业臂：解析 IK（几何法）
-- 7 轴及以上冗余臂：数值 IK（雅可比 + 阻尼最小二乘）
-- 仿真、规划、RL、VLA：数值 IK / 优化型 IK
-- ROS、MoveIt：用的是 TRAC-IK、KDL 数值求解器
+- 6轴工业臂：解析IK（几何法）
+- 7轴及以上冗余臂：数值IK（雅可比 + 阻尼最小二乘）
+- 仿真、规划、RL、VLA：数值IK / 优化型IK
+- ROS、MoveIt：用的是TRAC-IK、KDL数值求解器
+
 ### 5. 冗余自由度有什么解算方法
+
 - 雅可比伪逆 + 零空间投影
 零空间可以在不影响末端的前提下：让臂远离障碍物、远离关节极限、远离奇异点、让运动更平滑
-- 阻尼最小二乘法（公式见前文「IK 逆运动学 / 数值法 / 阻尼伪逆」）
+
+- 阻尼最小二乘法（公式见 [基础知识中的 IK](Note_Basics.md#basic-ik)）
+
 ### 6. sim2real中的难点是什么，会存在哪些问题，应该怎么解决？
-见 26.1.26 第 7 题。
+
+见26.1.26第7题。
 
 ### 7. 设计强化学习策略的时候有哪些方法论？
-> TODO: 整理观测/动作空间设计、奖励结构（稀疏 vs 稠密、引导奖励 + 终止惩罚）、Curriculum、Domain Randomization、PPO 超参经验等。
+
+按以下顺序设计即可：
+
+1. 明确成功、失败和超时条件，区分任务终止与时间截断。
+2. 观测覆盖任务所需状态，动作范围与控制频率匹配机器人能力。
+3. 用完成奖励确定目标，用接近、对齐等稠密奖励引导探索，避免奖励之间冲突。
+4. 先跑通简单场景，再逐步增加初始位置、物体属性等变化。
+5. 同时看成功率、失败轨迹、各奖励项和PPO训练指标，再决定调奖励还是超参数。
+
+不必堆很多奖励项，先保证每一项都服务于任务目标。
 
 ### 8. PPO算法相关,大致介绍一下
-见前文「RL 项目实践复盘」26.1.13 PPO 算法原理（基于 rsl_rl 源码）一节，含 Clip 损失、Actor-Critic、GAE 完整推导。
+
+见[RL基础：PPO与GAE](Note_Basics.md#basic-rl)；项目公式与代码见[PPO实践记录](Note_OtherProjects.md#ppo-practice)。
 
 ## 26.3.20 魔法原子 VLA算法工程师 一面
 
 ### 1. 采集的 ego-centric 数据以及 umi 数据是怎么接入模型的？
-先统一转换成Lerobot 2.1 格式数据集，再通过两套policy，π0.5 backbone 和 base ckpt 完全共享，差异只在 input/output transform 层：
-- `pi05_pico`：单目第一视角，20D 末端位姿（每只手 3 xyz + 6 6D rotation + 1 gripper），缺失的双 wrist 用零图 + `image_mask=False` 补齐。
-- `pi05_kaiumi`：三相机，14D 关节空间（每只手 6 joint + 1 gripper），直接复用 Aloha 接口做 joint flip 和 gripper 角度换算。
-模型内部把所有 state/action pad 到 32 维统一进 Transformer，输出再截断回真实维度。
+
+先统一转换成Lerobot 2.1格式数据集，再通过两套policy，π0.5 backbone和base ckpt完全共享，差异只在input/output transform层：
+
+- `pi05_pico`：单目第一视角，20D末端位姿（每只手3 xyz + 6 6D rotation + 1 gripper），缺失的双wrist用零图 + `image_mask=False` 补齐。
+- `pi05_kaiumi`：三相机，14D关节空间（每只手6 joint + 1 gripper），直接复用Aloha接口做joint flip和gripper角度换算。
+模型内部把所有state/action pad到32维统一进Transformer，输出再截断回真实维度。
 
 ### 2. 这两种数据是怎么 align 在一起的？
 
-**分层 align，能 align 的硬 align，不能 align 的用阶段式训练桥接**：
-- **能 align 的**：模型架构（同一份 Pi0Config + base ckpt）、数据格式（都用 LeRobot v2.1）、Tensor 维度（pad 到 32D）、图像通道（三相机接口）——全部强制对齐。
-- **不强行 align 的**：action 物理空间。Pico 是末端位姿、Kaiumi 是关节空间，物理意义不同，硬映射会丢信息。
+**分层align，能align的硬align，不能align的用阶段式训练桥接**：
 
-action 空间靠**三阶段课程式训练**桥接：
+- **能align的**：模型架构（同一份Pi0Config + base ckpt）、数据格式（都用LeRobot v2.1）、Tensor维度（pad到32D）、图像通道（三相机接口）——全部强制对齐。
+- **不强行align的**：action物理空间。Pico是末端位姿、Kaiumi是关节空间，物理意义不同，硬映射会丢信息。
+
+action空间靠**三阶段课程式训练**桥接：
+
 ```
 base ckpt → Pretrain (Ego) → Midtrain (UMI) → Posttrain (遥操) → final policy
             数据量最大        过渡真机分布      精细 fine-tune
 ```
-按"通用 → 半专用 → 精细"顺序学习，比把三类数据混训稳得多——混训时高方差的 ego 数据会淹没遥操精细信号。最终双臂操作任务完成率89%。
-
+按"通用 → 半专用 → 精细"顺序学习，比把三类数据混训稳得多——混训时高方差的ego数据会淹没遥操精细信号。最终双臂操作任务完成率89%。
 
 ## 26.3.22 魔法原子 VLA算法工程师 二面
 
 ### 1. 既然 Pretrain 阶段冻结了 action expert，那 pretrain 的输入输出是什么？用什么监督？
 
-**输入 / 输出 / 监督跟全参微调完全一样**，flow matching MSE 一路不变（`src/openpi/models/pi0.py::compute_loss`）：
+**输入 / 输出 / 监督跟全参微调完全一样**，flow matching MSE一路不变（`src/openpi/models/pi0.py::compute_loss`）：
 
-- **输入**：`cam_high` 图像（缺的双 wrist 用零图 + `image_mask=False`）+ language tokens + 20D state + ground-truth action chunk `[B, 50, 20]`。
-- **输出**：`v_t = action_out_proj(suffix_out[:, -H:])`，即未来 50 步的向量场。
+- **输入**：`cam_high` 图像（缺的双wrist用零图 + `image_mask=False`）+ language tokens + 20D state + ground-truth action chunk `[B, 50, 20]`。
+- **输出**：`v_t = action_out_proj(suffix_out[:, -H:])`，即未来50步的向量场。
 - **监督**：`L = ‖v_t − (noise − actions)‖²`。
 
-**"冻结 action expert"的实际范围比字面小**
+**"冻结action expert"的实际范围比字面小**
 
-`_build_freeze_filter()` 里 `TRAIN_ACTION_EXPERT=false` 只冻 PaliGemma 内部双专家中 `.*_1.*` 后缀的 Gemma-300M expert 权重；模型外层的 `action_in_proj / state_proj / action_out_proj / time_mlp` 等小投影头**不在 freeze 范围内，仍然可训**。Pretrain 实际训练的是：**SigLIP + Gemma-2B LLM + 这些小投影头**。
+`_build_freeze_filter()` 里 `TRAIN_ACTION_EXPERT=false` 只冻PaliGemma内部双专家中 `.*_1.*` 后缀的Gemma-300M expert权重；模型外层的 `action_in_proj / state_proj / action_out_proj / time_mlp` 等小投影头**不在freeze范围内，仍然可训**。Pretrain实际训练的是：**SigLIP + Gemma-2B LLM + 这些小投影头**。
 
 **冻结到底改变了什么——只换梯度的消费方**
 
-Loss 还是作用在 `v_t` 上，梯度反向穿过整个双专家 Transformer。经过 frozen action expert 的部分被丢弃，但通过双专家联合 attention，**梯度仍然流回 VLM**，驱动 VLM 学到"能让 frozen action expert 解码出 ego 动作"的视觉/语言表征。
+Loss还是作用在 `v_t` 上，梯度反向穿过整个双专家Transformer。冻结的是action expert的参数更新，不是其对输入的梯度传播；通过双专家联合attention，**梯度仍然流回VLM**，驱动VLM学到"能让frozen action expert解码出ego动作"的视觉/语言表征。
 
 **为什么这么设计**
 
-- Action expert 在 `pi05_base` 里已经学到了通用 motor prior，用 Pico ego 这种噪声大、视角新的数据全参微调会污染它；
-- 真正需要适配的是 VLM——第一人称视角与遥操第三人称差异极大，必须重学；
-- 思想上与 PI0.7 的 **KI（Knowledge Isolation）** 镜像：KI 是冻 VLM 训 action expert + FAST 离散监督；这里是冻 action expert 训 VLM + flow matching 监督。共同原则——**保护一侧预训练先验，只更新另一侧**。
+- Action expert在 `pi05_base` 里已经学到了通用motor prior，用Pico ego这种噪声大、视角新的数据全参微调会污染它；
+- 真正需要适配的是VLM——第一人称视角与遥操第三人称差异极大，必须重学；
+- 需要区分参数冻结与 **KI（Knowledge Insulation）**：冻结AE决定哪些参数更新；KI决定动作loss是否回传到VLM。开启KI时，VLM仍可由FAST或语言CE更新，不能将其直接等同于“冻结VLM”。
 
 ### 2. 那 pi05 本身的 VLM 是靠什么监督？这个监督具体指什么？
 
 要分两个语境：
 
-**(a) PI 实验室预训练 `pi05_base` 时**
+**(a) PI实验室预训练 `pi05_base` 时**
 
-VLM 被 **FAST 离散动作 token 的下一 token 交叉熵**直接监督（详见前文「PI0 训练流程笔记」§6.3）。两阶段：
+VLM被 **FAST离散动作token的下一token交叉熵**直接监督（详见前文「PI0训练流程笔记」§6.3）。两阶段：
 
-| 阶段 | α | VLM 监督 | Action expert |
+| 阶段 | α | VLM监督 | Action expert |
 |---|---|---|---|
-| FAST 预训练 | 0 | FAST token 下一 token 交叉熵 | 关 |
-| Flow matching 后训练 | 10 | 仍被 FAST 交叉熵监督 | flow matching MSE |
+| FAST预训练 | 0 | FAST token下一token交叉熵 | 关 |
+| Flow matching后训练 | 10 | 仍被FAST交叉熵监督 | flow matching MSE |
 
 联合损失：`L = H(FAST_tokens) + α · ‖v_θ − u_τ‖²`
 
-FAST token 是把连续 action chunk 经 DCT + BPE 离散化得到的整数序列；监督 VLM 就是让它把这个序列像"句子"一样一个个吐出来——本质就是 next token prediction，复用 LLM 的训练范式。
+FAST token是把连续action chunk经DCT + BPE离散化得到的整数序列；监督VLM就是让它把这个序列像"句子"一样一个个吐出来——本质就是next token prediction，复用LLM的训练范式。
 
-**(b) 我们在 ego 数据上做 Pretrain 时**
+**(b) 我们在ego数据上做Pretrain时**
 
-openpi 这套代码 `compute_loss` 只算 flow matching MSE，**FAST 路径没启用**。VLM 没有独立监督，只能靠 MSE 通过双专家联合 attention 反向传播——这也是为什么必须冻 action expert，否则 expert 会"独吃"梯度，VLM 学不动。
+openpi这套代码 `compute_loss` 只算flow matching MSE，**FAST路径没启用**。VLM没有独立监督，只能靠MSE通过双专家联合attention反向传播。冻结action expert是将适配集中到VLM的一种训练选择，并非VLM能够学习的必要条件；是否冻结应结合梯度路径、数据量和对照实验决定。
 
 **"监督"具体指什么**
 
-= 数据集里有"标准答案" → 模型预测与答案的差 = loss → 梯度 → 更新参数。同一份 action chunk 真值，可以走两种监督路径：
+= 数据集里有"标准答案" → 模型预测与答案的差 = loss → 梯度 → 更新参数。同一份action chunk真值，可以走两种监督路径：
 
-- 离散：FAST token 序列 → 交叉熵
-- 连续：action chunk 张量 → flow matching MSE
+- 离散：FAST token序列 → 交叉熵
+- 连续：action chunk张量 → flow matching MSE
 
-PI0.5 base 训练时两条路径并存（FAST 给 VLM、MSE 给 action expert + VLM）；下游 Pretrain (Ego) 阶段只剩 MSE 这一路。
+PI0.5 base训练时两条路径并存（FAST给VLM、MSE给action expert + VLM）；下游Pretrain (Ego) 阶段只剩MSE这一路。
 
 ## 26.9.9 TeleAI 具身智能算法研究员 秋招一面
 
@@ -2039,37 +1378,50 @@ PI0.5 base 训练时两条路径并存（FAST 给 VLM、MSE 给 action expert + 
 
 ### 1.超维动力-Ego、UMI、遥操分别有多少数据？为什么UMI更有效？
 
-超维使用的量级是：Ego 约 500–600 小时；UMI 约 1000 条，每条约 1 分钟；遥操约 100 条，每条约 1 分钟。UMI 与遥操的动作表示更接近，UMI 经过 IK 可以转成目标机械臂的 joint，因此在实际实验中的收益比 Ego 更明显。这个现象还同时受到数据质量、视角和动作表示的影响，不能只归因于数据量。
+超维使用的量级是：Ego约500–600小时；UMI约1000条，每条约1分钟；遥操约100条，每条约1分钟。UMI与遥操的动作表示更接近，UMI经过IK可以转成目标机械臂的joint，因此在实际实验中的收益比Ego更明显。这个现象还同时受到数据质量、视角和动作表示的影响，不能只归因于数据量。
 
 ### 2.超维动力-Pico在Ego和UMI中分别做什么？为什么UMI位姿更可靠？
 
-Ego 使用头显视频和手部 tracking；UMI 将 tracker 固定在假爪上，Pico 直接提供刚体 6DoF 位姿，训练图像来自固定摄像头，再通过 IK 得到机器人 joint。刚体 tracker 的跟踪链路比完整人手关键点估计更直接，通常更稳定；项目中没有做严格的设备精度对照。
+Ego使用头显视频和手部tracking；UMI将tracker固定在假爪上，Pico直接提供刚体6DoF位姿，训练图像来自固定摄像头，再通过IK得到机器人joint。刚体tracker的跟踪链路比完整人手关键点估计更直接，通常更稳定；项目中没有做严格的设备精度对照。
 
 ### 3.超维动力-为什么把UMI的EEF轨迹转成joint？一份数据能否复用于不同机器人？
 
-UMI 原始数据保留的是假爪 EEF 轨迹。根据最终 demo 或遥操使用的机械臂构型，可以换用对应的运动学模型和 IK，将同一份 EEF 示教 retarget 成不同机器人的 joint 数据，从而减少重复采集。超维当前实际落地的是松灵双臂；“可面向不同构型重新映射”是 pipeline 的复用设计，尚不等于已经完成所有构型的验证。换构型时仍需重新检查坐标系、TCP、工作空间、关节限位、碰撞和轨迹连续性。
+UMI原始数据保留的是假爪EEF轨迹。根据最终demo或遥操使用的机械臂构型，可以换用对应的运动学模型和IK，将同一份EEF示教retarget成不同机器人的joint数据，从而减少重复采集。超维当前实际落地的是松灵双臂；“可面向不同构型重新映射”是pipeline的复用设计，尚不等于已经完成所有构型的验证。换构型时仍需重新检查坐标系、TCP、工作空间、关节限位、碰撞和轨迹连续性。
 
 ### 4.超维动力-Ego数据的时间戳为什么要补偿？140ms 是怎么来的？
 
-视频和手部 tracking 不是同一条采集链路：摄像头曝光和帧写入、传输或缓存、tracking 算法处理、结果写盘都会引入延迟，帧率和调度差异还可能造成抖动。因此画面中的手部动作与 tracking 轨迹会错开。在那一批Ego数据上，我们通过图像与tracking的 overlay 对齐检查，估计出约 140ms 是较合适的补偿量，并在切片前用时间戳修正脚本统一时间轴。这个数值是针对该批数据的经验校准，不应理解为所有数据都适用的固定系统常数。
+视频和手部tracking不是同一条采集链路：摄像头曝光和帧写入、传输或缓存、tracking算法处理、结果写盘都会引入延迟，帧率和调度差异还可能造成抖动。因此画面中的手部动作与tracking轨迹会错开。在那一批Ego数据上，我们通过图像与tracking的overlay对齐检查，估计出约140ms是较合适的补偿量，并在切片前用时间戳修正脚本统一时间轴。这个数值是针对该批数据的经验校准，不应理解为所有数据都适用的固定系统常数。
 
 ### 5.超维动力-除了时间同步，Ego数据还怎样做质量控制？
 
-先做硬过滤：无效相机标定、视频过短、视频与 tracking 时长不匹配、双手大量缺失、动作范围异常等直接剔除；再从视觉、动作、时序和任务内容进行软评分。对局部 offset 随数据变化的问题，当前主要依靠可视化和批次级校准，没有把动态 offset 估计作为已完成能力。
+先做硬过滤：无效相机标定、视频过短、视频与tracking时长不匹配、双手大量缺失、动作范围异常等直接剔除；再从视觉、动作、时序和任务内容进行软评分。对局部offset随数据变化的问题，当前主要依靠可视化和批次级校准，没有把动态offset估计作为已完成能力。
 
-### 6.待补充超维动力-Ego 人手如何映射到机器人 gripper？
+### 6.魔法原子-Ego人手如何映射到机器人gripper？
 
-目前只保留这个问题。已知方向是根据拇指和食指的开合关系构造 gripper 状态，但具体特征、归一化、阈值和滤波规则，以及这部分是否由我直接实现，还需要进一步确认。
+EgoDex的`virtual_hand`分支用拇指尖与食指尖的三维距离表示手的开合程度，再映射为连续的gripper开合标签：
+
+```text
+d = ||p_index_tip - p_thumb_tip||
+gripper = clip((d - d_closed) / (d_open - d_closed), 0, 1)
+```
+
+生产配置中，`d_closed=0.01 m`、`d_open=0.12 m`：距离不超过1 cm记为闭合0，不小于12 cm记为张开1，中间线性插值。左右手分别计算，得到连续开合量；这两个阈值是配置参数，不是所有人手通用的标定常数。
+
+state保存当前帧开合量，action由下一帧目标生成。32D数据中，左右gripper分别写入索引`6/13`；人手没有真实机械臂关节，相关joint槽位保持无效。EEF姿态另由手部关键点构造，不用这一个距离推断姿态。
+
+这里生成的是归一化开合标签，不是电机角度，也不是完整五指重定向；部署到具体夹爪时，还需按设备接口转换量程和开闭方向。该开合公式本身没有时序滤波或开闭滞回。
+
+代码：[compute_virtual_hand](../pretrain_data_pipeline/src/pretrain_data_pipeline/data_io/eef_converter.py)、[生产配置](../pretrain_data_pipeline/configs/run/production/egodex_virtual_hand_quality_production_120core.yaml)。
 
 ## 26.9.11 蚂蚁灵波具身算法实习一面
 
 ### 1.魔法原子-32D action space 是什么？为什么同时保留joint和EEF？
 
-32D 由双臂 joint/gripper 的 14D 和双手 EEF 的 18D 组成；每侧 EEF 是 xyz 位置加 6D rotation。joint 提供可执行的机器人控制量，EEF 提供与视觉几何更直接的表示。不同数据缺失的维度通过 mask 屏蔽，避免把补零误当成真实状态。当前实际的 UMI retarget 只落地到 ARX5；统一 32D 接口保留了后续接入其他数据源的空间。
+32D由双臂joint/gripper的14D和双手EEF的18D组成；每侧EEF是xyz位置加6D rotation。joint提供可执行的机器人控制量，EEF提供与视觉几何更直接的表示。不同数据缺失的维度通过mask屏蔽，避免把补零误当成真实状态。当前实际的UMI retarget只落地到ARX5；统一32D接口保留了后续接入其他数据源的空间。
 
 ### 2.魔法原子-为什么统一到头部相机坐标系？UMI有腕部相机怎么办？
 
-统一的是 EEF 标签的表达坐标系，不是只使用头部相机。cam_high 更容易作为 Ego 与机器人数据的共同视觉参考；UMI 仍可保留双 wrist 图像，缺失或无效相机通过 camera mask 处理。joint 仍按目标机器人定义，不会变换到相机坐标系。
+统一的是EEF标签的表达坐标系，不是只使用头部相机。cam_high更容易作为Ego与机器人数据的共同视觉参考；UMI仍可保留双wrist图像，缺失或无效相机通过camera mask处理。joint仍按目标机器人定义，不会变换到相机坐标系。
 
 ### 3.魔法原子-没有官方相机内外参时，如何估计 Hy-UMI 的参数？如何验证？
 
@@ -2077,30 +1429,34 @@ UMI 原始数据保留的是假爪 EEF 轨迹。根据最终 demo 或遥操使�
 
 ### 4.魔法原子-VLM、Action Expert和Flow Matching的信息流是什么？为什么采用π/Qwen风格？
 
-图像、文本和 state/mask 形成 VLM 条件；Action Expert 接收 50 步、32D 的 noisy action，并加入 action position、flow time 和 state 条件。两支按三层 Gated DeltaNet 加一层 Full Attention 的结构重复运行，在 Full Attention 层由 action 读取 VLM 条件，最后预测 32D flow velocity，再通过反向积分生成动作 chunk。选择 π/Qwen 风格主要是为了复用视觉语言先验，并用连续 action expert 建模动作 chunk；同时保持已有 hybrid 结构，便于在有限资源下快速建立可训练、可评测的 baseline。没有做完整的架构横向消融，因此不宣称它普遍优于其他 VLA 架构。
+图像、文本和state/mask形成VLM条件；Action Expert接收50步、32D的noisy action，并加入action position、flow time和state条件。两支按三层Gated DeltaNet加一层Full Attention的结构重复运行，在Full Attention层由action读取VLM条件，最后预测32D flow velocity，再通过反向积分生成动作chunk。选择 π/Qwen风格主要是为了复用视觉语言先验，并用连续action expert建模动作chunk；同时保持已有hybrid结构，便于在有限资源下快速建立可训练、可评测的baseline。没有做完整的架构横向消融，因此不宣称它普遍优于其他VLA架构。
 
 ### 5.魔法原子-Ego、UMI、真机和仿真数据如何混训？mask与robot tag分别解决什么？
 
-所有数据统一到同一套相机 key、32D state/action 语义和 LeRobot 数据格式，并按 source 独立做归一化。action mask 和 state mask 表示哪些维度真实存在，camera mask 表示哪些图像有效；robot tag 用来说明当前 embodiment。mask解决缺失值问题，robot tag解决构型条件问题，两者不能互相替代。当前UMI的实际joint映射目标是ARX5。
+所有数据统一到同一套相机key、32D state/action语义和LeRobot数据格式，并按source独立做归一化。action mask和state mask表示哪些维度真实存在，camera mask表示哪些图像有效；robot tag用来说明当前embodiment。mask解决缺失值问题，robot tag解决构型条件问题，两者不能互相替代。当前UMI的实际joint映射目标是ARX5。
 
 ### 6.魔法原子-为什么可能出现EEF-only优于joint-only和EEF+joint？
 
-这是部分微调实验中的观察，不是普遍规律。预训练中的 Ego、UMI 原生表示更接近 EEF，IK 生成的 joint 可能带来额外误差；同时预测两种表示也可能增加优化负担。要固定数据、训练预算和执行方式做受控消融，才能区分表示、标签质量和多目标监督的影响。
+这是部分微调实验中的观察，不是普遍规律。预训练中的Ego、UMI原生表示更接近EEF，IK生成的joint可能带来额外误差；同时预测两种表示也可能增加优化负担。要固定数据、训练预算和执行方式做受控消融，才能区分表示、标签质量和多目标监督的影响。
 
 ### 7.absolute action和delta action怎么选择？
 
-应按物理量分别决定。超维 Ego 使用 xyz delta、6D rotation absolute、gripper absolute；UMI 和遥操使用 joint delta、gripper absolute。魔法原子中平移和 joint 使用相对量，旋转按合法旋转组合处理，gripper 保持绝对状态。没有完整重跑预训练的 absolute/delta 消融，已有比较主要集中在微调阶段的 action representation。
+基础查阅：[旋转增量](Note_Basics.md#basic-rotation)、[动作表示](Note_Basics.md#basic-normalization)。
+
+应按物理量分别决定。超维Ego使用xyz delta、6D rotation absolute、gripper absolute；UMI和遥操使用joint delta、gripper absolute。魔法原子中平移和joint使用相对量，旋转按合法旋转组合处理，gripper保持绝对状态。没有完整重跑预训练的absolute/delta消融，已有比较主要集中在微调阶段的action representation。
 
 ### 8.魔法原子·Memory-历史帧怎么融合？FrameSamp的token budget和关键帧怎么理解？
 
-不同分支的实现不同：MagicVLA v0使用零门控temporal delta，v1 使用先时间、后空间的attention融合六帧；Hy-VLA在视觉塔中加入时空attention；π0.5 FrameSamp+Modul则对历史图像做离线视觉编码和空间压缩，再让Action Expert cross-attend历史token并做调制。
+不同分支的实现不同：MagicVLA v0使用零门控temporal delta，v1使用先时间、后空间的attention融合六帧；Hy-VLA在视觉塔中加入时空attention；π0.5 FrameSamp+Modul则对历史图像做离线视觉编码和空间压缩，再让Action Expert cross-attend历史token并做调制。
 
 FrameSamp的基线是在当前帧以前均匀采样历史，固定budget决定每帧保留多少token、最多覆盖多少帧；提高首帧或is_key_frame权重属于额外消融，不是自动理解语义关键帧。若关键帧定义依赖未来动作，训练和推理之间会产生信息不一致。
 
 ### 9.魔法原子·Memory-真正的memory应该带来什么能力？如何验证？
 
+基础查阅：[模型评测](Note_Basics.md#basic-evaluation)。
+
 目标是利用过去信息判断任务进度，记住已经不可见的目标或遮挡前的状态，而不是单纯增加历史图像。应构造“当前观测相近、历史不同、正确动作不同”的任务，并比较无历史、正确历史、打乱历史和移除关键历史的结果。只有依赖历史的任务稳定受益，才能说明模型确实使用了memory。
 
 ### 10.不同数据集的任务组织和数据工厂应该怎样设计？
 
-数据不只是小时数，还要覆盖完整交互过程、阶段边界、失败恢复和真正需要历史的长程任务。采集时应统一设备、坐标和时间戳，控制丢帧、异常头动和手部不可见；标注可采用自动标注、人工抽检和反馈修正。结合超维经验，UMI 更适合承担中间阶段的目标机器人动作对齐，真机数据用于最终执行适配。
+数据不只是小时数，还要覆盖完整交互过程、阶段边界、失败恢复和真正需要历史的长程任务。采集时应统一设备、坐标和时间戳，控制丢帧、异常头动和手部不可见；标注可采用自动标注、人工抽检和反馈修正。结合超维经验，UMI更适合承担中间阶段的目标机器人动作对齐，真机数据用于最终执行适配。
