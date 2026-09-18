@@ -283,10 +283,16 @@ Lift示例通常包含三个关键引导项：
 
 PPO通过限制策略更新幅度来确保训练稳定性。其核心公式为：
 
-- **策略裁剪（Clip Surrogate Object）**: 
-    $$L^{CLIP}(\theta) = \hat{\mathbb{E}}_t \left[ \min \left( r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right]$$
-- **总损失函数（Total Loss）**: 
-    $$L_t^{PPO}(\theta) = \hat{\mathbb{E}}_t \left[ L_t^{CLIP}(\theta) - c_1 L_t^{VF}(\theta) + c_2 S[\pi_{\theta}](s_t) \right]$$
+- **策略裁剪（Clip Surrogate Objective）**：
+
+  $$
+  L^{CLIP}(\theta) = \hat{\mathbb{E}}_t \left[ \min \left( r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right]
+  $$
+- **总损失函数（Total Loss）**：
+
+  $$
+  L_t^{PPO}(\theta) = \hat{\mathbb{E}}_t \left[ L_t^{CLIP}(\theta) - c_1 L_t^{VF}(\theta) + c_2 S[\pi_{\theta}](s_t) \right]
+  $$
 
 #### 2. Actor-Critic 模型结构
 

@@ -682,7 +682,7 @@ Hy-UMI没有官方 `cam_high` 内外参，且每帧可稳定利用的几何对�
 2. 用 `max(|I-background|, background-I)` 同时保留运动和暗色证据，形态学去噪后取两个连通域；左右手尝试两种匹配，选总重投影误差更小的一种。
 3. 以针孔模型优化15个变量：相机旋转/平移6D、共享焦距1D、主点2D、左右device offset各3D。offset解决3D跟踪原点和图像暗块质心并非同一点的问题。
 4. 优化目标是所有有效对应的pixel residual的最小60% trimmed mean，降低遮挡、设备重叠和blob误检的影响；从经过验证的seed多次Nelder-Mead优化，而不是随机初始化。
-5. 标定输出 `T_W_C`（`cam_high -> UMI world`）和K。训练EEF通过 `$T_C^E=(T_W^C)^{-1}T_W^E$` 转到相机系；**device offset只用于标定，不写入EEF标签**。
+5. 标定输出 `T_W_C`（`cam_high -> UMI world`）和K。训练EEF通过$T_C^E=(T_W^C)^{-1}T_W^E$转到相机系；**device offset只用于标定，不写入EEF标签**。
 
 table_000的全局标定为 `fx=fy=235.7 px`，重投影中位误差约41 px、held-out约37 px。由于2D blob是“手+设备”的质心而非动捕原点，存在约15-20 px的误差地板；验收以跨任务overlay为主，数值residual只作汇总。头戴相机跨session会变化，因此后续以table全局K/offset为先验，session主要refine rotation。
 
@@ -824,9 +824,9 @@ AE的state MLP为 `32 → 1024 → 1024`；VLM prefix的状态投影是另一套
 
 基础查阅：[Flow Matching](Note_Basics.md#basic-flow)、[Masked MSE](Note_Basics.md#basic-masked-mse)、[归一化](Note_Basics.md#basic-normalization)。
 
-训练机器人batch的目标是归一化后的 `action[50,32]`。采样 `$t\sim Beta(1.5,1.0)$` 并截断到 `[0.001,0.999]`，构造 `$x_t=(1-t)a+t\epsilon$`，模型预测velocity `$\epsilon-a$`。loss只在 `~action_is_pad & action_dim_mask` 的元素上计算，可选提高前几个可执行horizon的权重。
+训练机器人batch的目标是归一化后的 `action[50,32]`。采样$t\sim\mathrm{Beta}(1.5,1.0)$并截断到`[0.001,0.999]`，构造$x_t=(1-t)a+t\epsilon$，模型预测velocity$\epsilon-a$。loss只在 `~action_is_pad & action_dim_mask` 的元素上计算，可选提高前几个可执行horizon的权重。
 
-- **chunk delta**：joint/平移使用相对当前state的delta；gripper保持绝对命令；两组EEF rotation-6D用 `$R_{target}R_{state}^{T}$` 组合，而非逐元素相减。
+- **chunk delta**：joint/平移使用相对当前state的delta；gripper保持绝对命令；两组EEF rotation-6D用$R_{target}R_{state}^{T}$组合，而非逐元素相减。
 - **共同训练**：8个机器人source用flow matching，EO VLM-SFT用Qwen CE；当前主配方为robotics:EO=`9:1`。FAST是辅助的动作token CE，不参与部署时的动作生成。
 - **Knowledge insulation**：action expert读取detached VLM prefix，flow gradient不更新VLM；关闭KI时可做完全端到端共同优化。当前8-source配方开启KI，VLM通过FAST/EO loss更新。
 - **推理**：从masked Gaussian noise开始，默认10次Euler reverse-flow。VLM prefix与每个full-attention层的K/V对噪声步骤无关，先计算一次并缓存；每一步都重新施加action mask，保证训练与推理都不会在不存在的embodiment维度上产生噪声或速度。
@@ -838,7 +838,7 @@ AE的state MLP为 `32 → 1024 → 1024`；VLM prefix的状态投影是另一套
 |---|---|---|
 | full fine-tune第一次真实forward直接报 `AttributeError` | joint trunk从decoder layer读取 `block_type`；Transformers 5.5.4改名为 `layer_type`，而旧fake test恰好复制了错误假设 | 改从checkpoint的 `text_config.layer_types` 读取层调度，并在初始化校验action expert与VLM的24层schedule一致；测试模拟真实layer缺少该属性 |
 | 缺失维度被当作“中位姿态” | quantile normalization后 `0` 是范围中点。旧逻辑把masked state清零后丢弃mask，RoboTwin2右EEF仅约41.3% 帧有效 | 将32D state mask与state一起输入MLP；action mask同时控制noise、flow loss和每一轮推理更新 |
-| EEF rotation的delta语义错误但loss不报错 | 旧实现直接相减rotation-6D，结果不在SO(3)，且同一手腕运动会随参考坐标变化 | 改为 `$R_{rel}=R_{target}R_{state}^{T}$` 后再转rotation-6D；把rotation规则写入norm-stats signature，拒绝复用旧统计量 |
+| EEF rotation的delta语义错误但loss不报错 | 旧实现直接相减rotation-6D，结果不在SO(3)，且同一手腕运动会随参考坐标变化 | 改为$R_{rel}=R_{target}R_{state}^{T}$后再转rotation-6D；把rotation规则写入norm-stats signature，拒绝复用旧统计量 |
 | 多卡训练有效随机性不足，resume后更新几乎停滞 | 所有rank用同一全局RNG，flow time/noise完全相同；同时optimizer load把bf16参数对应的fp32 master/moments强转回bf16 | rank-aware seed保留数据source同步而区分模型随机数；resume后显式恢复fp32 optimizer state，并在关闭autocast的fp32 delta-rule路径测试 |
 | FAST辅助目标和部署动作不一致 | episode尾部padding被置零后仍送入FAST tokenizer；归一化零值并非“静止”，生成了伪造的回中位动作token | tokenizer按sample截断/前向填充invalid tail；flow与FAST共享pad语义。checkpoint保存并强制校验per-source normalization/delta metadata |
 
@@ -1029,6 +1029,8 @@ Q来自AE；K/V来自VLM prefix和AE两部分，使用各自的投影后沿token
 **实验边界。** 仓库已有多任务和keyframe boost配置；配置存在不等于效果已验证。20帧、stride=25覆盖最远500个数据帧，秒数需按数据FPS换算。闭环收益以对应checkpoint、任务和评估记录为准。
 
 #### 4.4 三个方向的统一训练和比较方法
+
+**MagicVLA分支补充。** 原仓库除mem-v0/v1外，feat/history还实现了压缩历史图像的Base/SGM prefix和部署侧ring buffer；model/magicvla_streamer包含观测动作历史与专家递归状态。它们与上述Pi0.5实现分别记录，分支commit、机制和边界见[MagicVLA Memory分支实现](MagicAtom/01_视觉记忆/04_MagicVLA_Memory分支实现.md)。
 
 先区分两个采样层次：history sampling决定单个样本读取哪些历史，`keyframe_boost` 决定哪些当前anchor更常被训练。FrameSamp的均匀采样包含当前帧，DM05的历史分支只取严格过去帧，两者都不能读取未来。
 

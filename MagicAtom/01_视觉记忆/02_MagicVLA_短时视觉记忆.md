@@ -4,13 +4,13 @@
 
 ## 1. 结论
 
-v0 和 `magicvla-mem-v1` 都是无状态的短时视觉记忆：每个样本显式携带固定历史窗口，模型内部不维护跨 episode 的 memory buffer。当前代码保留 v1，v0 作为对照。
+v0和`magicvla-mem-v1`都是无状态的短时视觉记忆：每个样本显式携带固定历史窗口，模型内部不维护跨episode的memory buffer。这里分别指原仓库的mem-v0和mem-v1分支，不代表main已合入。其他分支的历史prefix、部署buffer和Streamer见[Memory分支实现](04_MagicVLA_Memory分支实现.md)。
 
 ## 2. 共同契约
 
 | 记号 | 含义 | 当前设置 |
 |---|---|---:|
-| `B` | 每 rank batch size | v0=60，v1=48 |
+| `B` | 每rank batch size | 随配方变化，v1的c1a40d3配置为64 |
 | `V` | 相机数 | 3 |
 | `K` | 每条序列的帧数 | 6 |
 | `P` | 每帧 patch 数 | 256（16×16） |
@@ -34,7 +34,7 @@ v0 用 zero-gated temporal delta branch 注入历史变化信息。新增分支�
 
 ## 4. v1
 
-v1 用 time-then-space attention 处理历史视觉序列，并保持参数增量为零初始化。核心顺序是：
+v1用time-then-space attention处理历史视觉序列，复用原视觉参数，不新增gate或Parameter。零新增参数不是零初始化分支；K>1时历史立即参与融合，K=1时退化为单图路径。核心顺序是：
 
 1. 在同一空间位置上融合不同时间帧；
 2. 再在每个时间步内融合空间 patch；
@@ -47,7 +47,7 @@ v1 的目标不是把历史 token 直接拼到语言上下文，而是在视觉�
 - 检查 6 帧是否按真实数据 FPS 采样，而不是假定固定帧率。
 - 检查三相机的 padding、无效相机 mask 和 batch reshape。
 - 分别比较无历史、v0、v1，并报告单帧与历史输入的闭环成功率。
-- 记录新增参数、zero-init 分支是否真正更新、checkpoint 是否包含 memory 配置。
+- v0检查gate梯度，v1检查共享视觉参数梯度；checkpoint需记录memory配置。
 - 将“attention 读到了历史”与“历史带来任务收益”分开验证。
 
 ## 6. 当前边界
