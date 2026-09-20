@@ -62,7 +62,7 @@ If the paper is especially dense, add "一句话说清楚" before section one. I
 - Explain why the mechanism is different from obvious alternatives.
 - Translate equations into intuition immediately after the equation.
 - Include implementation/training details only if they help reproduce or judge the paper.
-- For VLA/robotics papers, always include "3.4 数据使用与维度追踪" unless the paper is purely conceptual and has no data/training component.
+- For VLA/robotics papers, include a data-focused subsection when data or training materially affects the method, claims, or reproducibility. Keep it concise when data is only supporting context; go deeper for data-centric papers or when the pipeline is a main contribution.
 
 Common robotics/VLA details worth capturing:
 
@@ -74,7 +74,7 @@ Common robotics/VLA details worth capturing:
 
 ### 3.4 数据使用与维度追踪
 
-Write this section for the user's VLA algorithm-engineering perspective. Be concrete and compact; prefer tables and explicit shapes over narrative filler. If a detail is absent from the paper, write "论文未说明" or "未报告", not an inferred value.
+Write this section for the user's VLA algorithm-engineering perspective. Be concrete and compact; prefer tables and explicit shapes over narrative filler. The topics below are prompts, not a checklist: choose the details that explain the paper's method or affect reproducibility. A paper with one straightforward data source may need only a few sentences; use an inventory table when there are multiple sources, stages, or materially different supervision types. If a key detail is absent from the paper, write "论文未说明" or "未报告", not an inferred value. Omit peripheral fields rather than listing every unknown.
 
 Start with a data inventory table when there is more than one source:
 
@@ -84,7 +84,7 @@ Start with a data inventory table when there is more than one source:
 | ... | ... | episode / trajectory / transition / chunk | RGB, proprio, language, action | ... | ... | pretrain / finetune / eval | filtering, resampling, normalization... |
 ```
 
-Then explain these points when available:
+Select from these points when they matter to the paper:
 
 - **样本单位**: one training item is an episode, trajectory window, transition, image-language pair, video clip, or action chunk; specify context length and prediction target.
 - **视觉数据**: camera count, view names, RGB/depth usage, resolution before/after crop/resize, frame rate, temporal stacking, augmentation, and encoder input shape.
@@ -105,7 +105,7 @@ For papers with important dimensions, add a short "维度快照" block:
 - Prediction target: ...
 ```
 
-The goal is not to over-document every dataset citation; it is to make clear how raw data becomes model input/supervision and which hidden engineering choices affect reproducibility.
+The goal is to make the relevant path from raw data to model input/supervision clear, and to surface the engineering choices that affect the paper's claims or reproducibility. Do not expand a note just to cover every item in this list.
 
 ### 四、实验与结果
 
@@ -154,7 +154,7 @@ Use 2-3 numbered points:
 ## Naming
 
 - Folder: create one folder per paper under `Paper/`, named `<YYMMDD>_<ShortName>_<OrgOrLab>_<PaperYear>` by default.
-- Use `<YYMMDD>` as the PDF file's modification/creation date in local time (check with `stat`). For example, a PDF last modified on June 16, 2026 yields `260616_`.
+- Use `<YYMMDD>` as the local date the paper note is first added to the library, not the PDF's modification/creation timestamp. For example, a note first added on June 16, 2026 yields `260616_`.
 - Main note filename: use the canonical paper name without the naming-date suffix, `<ShortName>_<OrgOrLab>_<PaperYear>.md`, unless the user explicitly asks for mirrored folder/file names.
 - Treat source PDFs as temporary artifacts and remove them after the Markdown note is generated and checked, unless the user explicitly asks to retain the PDF.
 - Auxiliary code notes may use names like `openpi05_code_walkthrough.md` or `<paper>_code_learning.md`.
