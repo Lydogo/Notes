@@ -1462,3 +1462,27 @@ FrameSamp的基线是在当前帧以前均匀采样历史，固定budget决定�
 ### 10.不同数据集的任务组织和数据工厂应该怎样设计？
 
 数据不只是小时数，还要覆盖完整交互过程、阶段边界、失败恢复和真正需要历史的长程任务。采集时应统一设备、坐标和时间戳，控制丢帧、异常头动和手部不可见；标注可采用自动标注、人工抽检和反馈修正。结合超维经验，UMI更适合承担中间阶段的目标机器人动作对齐，真机数据用于最终执行适配。
+
+## 26.9.30 字节 Seed 数据算法工程师一面
+
+以下问题均针对超维动力 Pico 数据项目。
+
+### 1. 超维项目里人脸隐私模糊用的是什么模型？
+
+使用 InsightFace 的 SCRFD 做人脸检测，再对人脸区域做椭圆高斯模糊；模型包为 `buffalo_l`。回答时可以区分检测模型和后处理：SCRFD负责定位人脸，椭圆高斯模糊负责打码。
+
+代码与流程：[FaceBlurRefiner](../kai_work/pico-data-refine/pico-data-refine-main-608c0bcddae8969f66fb26bbc2d1a427752c7dea/python/refiners/face_blur_refiner.py)、[数据精修说明](../kai_work/pico-data-refine/pico-data-refine-main-608c0bcddae8969f66fb26bbc2d1a427752c7dea/README.md#8-faceblurrefiner-配置)。
+
+### 2. 超维数据 pipeline 使用哪个 LLM 做标注？
+
+Pico 数据精修 pipeline 的 skill 分类使用 Qwen-VL，配置模型为 `qwen-vl-max-latest`：输入右目均匀采样的 3 张图和已有的片段描述 JSON，输出 skill 分类结果。这个 pipeline 把 `segments_description.json` 作为输入，因此本地资料能确认的是 skill 分类模型；如果问题指更上游的片段描述生成模型，还需要确认具体是哪一段标注流程。
+
+代码与配置：[Pico 精修 pipeline 说明](../kai_work/pico-data-refine/pico-data-refine-main-608c0bcddae8969f66fb26bbc2d1a427752c7dea/README.md#3-修复项目)。
+
+### 3. 超维项目里的去畸变是怎么实现的？
+
+Pico 双目鱼眼视频按左右目拆开处理，使用相机内参矩阵 `K` 和 equiDis62 畸变系数 `D` 建立去畸变映射表。模型采用等距鱼眼投影，径向部分用 `θ` 的 6 阶多项式（6 个径向系数），并支持 2 个切向系数。实现时对每个目标针孔图像像素反向计算其在原始鱼眼图像中的采样位置，再用 OpenCV `cv2.remap`（双线性插值）重映射；左右目分别输出去畸变视频。焦距缩放参数可控制视野，scale 小于 1 会保留更宽视野，大于 1 会裁切更多。
+
+面试时可补充：原始数据处理脚本从 `camera_params.json` 读取标定；后续精修版本可按设备 SN 从参考标定库加载参数。相机标定无效时会跳过或无法完成去畸变，所以先做标定有效性检查。
+
+实现：[原始视频去畸变脚本](../kai_work/pico_egadata_pipline/pico_egadata_pipline-master-e019270fb57841410c22e780fae78604cb113e0c/scripts/01_video_undistort.py)、[精修版 VideoUndistortRefiner](../kai_work/pico-data-refine/pico-data-refine-main-608c0bcddae8969f66fb26bbc2d1a427752c7dea/python/refiners/video_undistort_refiner.py)、[模型与流程说明](../kai_work/pico-data-refine/pico-data-refine-main-608c0bcddae8969f66fb26bbc2d1a427752c7dea/README.md#9-videoundistortrefiner-配置)。
